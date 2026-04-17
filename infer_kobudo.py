@@ -31,10 +31,10 @@ def interactive_inference(
     top_p: float,
 ):
     from peft import PeftModel
-    from transformers import AutoModelForVision2Seq, AutoProcessor
+    from transformers import LlavaOnevisionForConditionalGeneration, AutoProcessor
 
     logger.info("Loading base model...")
-    model = AutoModelForVision2Seq.from_pretrained(
+    model = LlavaOnevisionForConditionalGeneration.from_pretrained(
         base_model,
         trust_remote_code=True,
         torch_dtype=torch.bfloat16,

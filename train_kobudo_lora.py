@@ -48,6 +48,9 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset
 
+# Reduce CUDA memory fragmentation — recommended when hitting OOM on 12 GB cards.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 # Path to the TOML file that defines item keywords and their descriptions.
 # Edit items.toml to add, remove, or re-categorise items without touching code.
 _ITEMS_TOML = Path(__file__).parent / "items.toml"
@@ -72,13 +75,18 @@ class TrainingConfig:
     gradient_accumulation_steps: int = 8
     learning_rate: float = 1e-5
     num_train_epochs: int = 3
-    warmup_ratio: float = 0.03
+    warmup_steps: int = 100
     weight_decay: float = 0.01
     max_grad_norm: float = 0.5
     data_path: str = "./training_data"
     output_dir: str = "./output/kobudo_lora"
     max_new_tokens: int = 512
     max_seq_length: int = 8192
+    # Cap the longest image edge before the processor's AnyRes tiling.
+    # LLaVA-OneVision splits images into 384x384 tiles; a 2304x2304 image
+    # produces ~36 tiles (~7 300 tokens) which exhausts 12 GB VRAM.
+    # 768 keeps the longest edge within a 2x2 tile grid (~4 tiles, ~800 tokens).
+    max_image_size: int = 768
     temperature: float = 0.1
     top_p: float = 0.9
     mixed_precision: str = "bf16"
@@ -116,27 +124,30 @@ def set_seed(seed: int):
 
 
 @lru_cache(maxsize=1)
-def _load_items() -> tuple[dict[str, str], str, str]:
+def _load_items() -> tuple[dict[str, str], str, str, str]:
     """
     Load item keywords and caption text from items.toml (read once, then cached).
 
     Returns:
-        items    — merged dict of keyword -> description from all non-[general] sections
-        fallback — caption used when no keyword matches the filename
-        prefix   — short string prepended to every matched-item caption
+        items           — merged dict of keyword -> answer text from all non-[general] sections
+        user_question   — question placed in the user turn for every image
+        answer_prefix   — short string prepended to every matched-item answer
+        fallback_answer — answer used when no keyword matches the filename
     """
     with open(_ITEMS_TOML, "rb") as f:
         data = tomllib.load(f)
 
     general = data.get("general", {})
-    fallback = general.get(
-        "fallback_caption",
-        "Describe this Okinawan martial arts equipment in detail, "
-        "including its name, type, traditional use, and any distinguishing "
-        "features. Respond in English only.",
+    user_question = general.get(
+        "user_question",
+        "What is this Okinawan martial arts item? Describe its name, traditional use, "
+        "and any distinguishing features. Respond in English only.",
     )
-    prefix = general.get(
-        "prompt_prefix", "Describe this Okinawan martial arts item in detail."
+    answer_prefix = general.get("answer_prefix", "This is a")
+    fallback_answer = general.get(
+        "fallback_answer",
+        "Okinawan martial arts equipment. Describe its name, type, traditional use, "
+        "and any distinguishing features in detail.",
     )
 
     items: dict[str, str] = {}
@@ -144,34 +155,35 @@ def _load_items() -> tuple[dict[str, str], str, str]:
         if section != "general" and isinstance(entries, dict):
             items.update(entries)
 
-    return items, fallback, prefix
+    return items, user_question, answer_prefix, fallback_answer
 
 
-def auto_generate_caption(filename: str) -> str:
+def auto_generate_caption(filename: str) -> tuple[str, str]:
     """
-    Generate English caption based on filename for kobudo/karate items.
-    Keywords and descriptions are loaded from items.toml; all category
-    sections are merged into one lookup so the file stays the single source
-    of truth for item data.
+    Return (user_question, assistant_answer) for a given image filename.
+
+    The question goes in the user turn; the answer goes in the assistant turn
+    so the chat template's {% generation %} block marks it as the training
+    target. Keywords and descriptions are loaded from items.toml.
     """
     filename_lower = filename.lower().replace("_", " ").replace("-", " ")
 
-    items, fallback, prefix = _load_items()
+    items, user_question, answer_prefix, fallback_answer = _load_items()
 
     for item_name, description in items.items():
         if item_name in filename_lower:
-            return f"{prefix} {description}"
+            return user_question, f"{answer_prefix} {description}"
 
-    return fallback
+    return user_question, fallback_answer
 
 
 class KobudoDataset(Dataset):
     """Dataset for kobudo/karate items from folder-based images"""
 
-    def __init__(self, image_folder: str, processor: Any, max_length: int = 2048):
+    def __init__(self, image_folder: str, processor: Any, max_image_size: int = 1152):
         self.image_folder = Path(image_folder)
         self.processor = processor
-        self.max_length = max_length
+        self.max_image_size = max_image_size
         self.image_extensions = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 
         # Find all images
@@ -198,20 +210,47 @@ class KobudoDataset(Dataset):
 
         try:
             image = Image.open(image_path).convert("RGB")
+            # Downscale large images before AnyRes tiling so the processor does
+            # not produce too many 384x384 tiles.  Aspect ratio is preserved.
+            w, h = image.size
+            if max(w, h) > self.max_image_size:
+                scale = self.max_image_size / max(w, h)
+                image = image.resize(
+                    (int(w * scale), int(h * scale)), Image.Resampling.LANCZOS
+                )
         except Exception as e:
             logger.warning(f"Failed to load {image_path}: {e}")
-            image = Image.new("RGB", (336, 336), color="black")
+            image = Image.new("RGB", (384, 384), color="black")
 
-        # Generate English caption
-        caption = auto_generate_caption(image_path.stem)
+        # Generate question/answer pair for this image.
+        # The chat template's {% generation %} block marks the assistant turn
+        # as the only part the model trains on — so the description MUST be
+        # in the assistant turn, not the user turn.
+        question, answer = auto_generate_caption(image_path.stem)
+
+        conversation = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image"},
+                    {"type": "text", "text": question},
+                ],
+            },
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": answer},
+                ],
+            },
+        ]
+        prompt = self.processor.apply_chat_template(
+            conversation, add_generation_prompt=False
+        )
 
         inputs = self.processor(
-            text=[caption],
+            text=[prompt],
             images=[image],
             return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=self.max_length,
         )
 
         return {k: v.squeeze(0) if v.dim() > 1 else v for k, v in inputs.items()}
@@ -219,7 +258,7 @@ class KobudoDataset(Dataset):
 
 def load_model_and_processor(config: TrainingConfig):
     """Load model and processor with LoRA applied"""
-    from transformers import AutoProcessor, AutoModelForVision2Seq  # type: ignore[attr-defined]
+    from transformers import AutoProcessor, LlavaOnevisionForConditionalGeneration
     from peft import LoraConfig, get_peft_model
 
     logger.info(f"Loading base model: {config.base_model}")
@@ -228,7 +267,7 @@ def load_model_and_processor(config: TrainingConfig):
 
     torch_dtype = torch.bfloat16 if config.mixed_precision == "bf16" else torch.float16
 
-    model = AutoModelForVision2Seq.from_pretrained(
+    model = LlavaOnevisionForConditionalGeneration.from_pretrained(
         config.base_model,
         trust_remote_code=True,
         torch_dtype=torch_dtype,
@@ -241,10 +280,16 @@ def load_model_and_processor(config: TrainingConfig):
         target_modules=config.lora_target_modules,
         lora_dropout=config.lora_dropout,
         bias="none",
-        task_type="VISION_LANG_LOSS",
+        task_type="CAUSAL_LM",
     )
 
     model = get_peft_model(model, lora_config)
+
+    # Gradient checkpointing trades compute for memory: activations are
+    # recomputed during the backward pass instead of stored.  Essential for
+    # fitting a vision-language model in 12 GB VRAM.
+    model.enable_input_require_grads()  # type: ignore[operator]  # PEFT has no type stubs
+    model.gradient_checkpointing_enable()  # type: ignore[operator]
 
     trainable_params, total_params = 0, 0
     for p in model.parameters():
@@ -264,9 +309,8 @@ def train(config: TrainingConfig):
     from transformers import (
         TrainingArguments,
         Trainer,
-        DataCollatorForVision2Seq,
         set_seed,
-    )  # type: ignore[attr-defined]
+    )
     from torch.utils.data import Subset
     import random
 
@@ -291,6 +335,9 @@ def train(config: TrainingConfig):
         config.output_dir = str(Path(config.output_dir).parent / "smoke_test")
 
     os.makedirs(config.output_dir, exist_ok=True)
+    os.environ.setdefault(
+        "TENSORBOARD_LOGGING_DIR", os.path.join(config.output_dir, "logs")
+    )
 
     # Save config
     config_dict = {
@@ -308,7 +355,7 @@ def train(config: TrainingConfig):
 
     logger.info(f"Loading images from: {image_folder}")
     full_dataset = KobudoDataset(
-        image_folder, processor, max_length=config.max_seq_length
+        image_folder, processor, max_image_size=config.max_image_size
     )
 
     # Split train/eval 90/10
@@ -325,9 +372,37 @@ def train(config: TrainingConfig):
     logger.info(f"Training samples: {len(train_dataset)}")
     logger.info(f"Evaluation samples: {len(eval_dataset)}")
 
-    data_collator = DataCollatorForVision2Seq(
-        processor=processor, model=model, padding=True
-    )
+    class _VisionDataCollator:
+        """Pads 1-D sequence tensors and stacks higher-dim tensors (e.g. pixel_values).
+        Sets padding positions in labels to -100 so they are ignored by the loss.
+        """
+
+        def __init__(self, pad_token_id: int):
+            self.pad_token_id = pad_token_id
+
+        def __call__(self, features: list[dict]) -> dict[str, torch.Tensor]:
+            batch: dict[str, torch.Tensor] = {}
+            for key in features[0]:
+                vals = [f[key] for f in features]
+                if vals[0].dim() > 1:
+                    # pixel_values, image_sizes, etc. — all same shape, just stack
+                    batch[key] = torch.stack(vals)
+                else:
+                    # 1-D sequence tensors — pad to the longest in this batch
+                    max_len = max(v.size(0) for v in vals)
+                    fill = self.pad_token_id if key == "input_ids" else 0
+                    padded = torch.full((len(vals), max_len), fill, dtype=vals[0].dtype)
+                    for i, v in enumerate(vals):
+                        padded[i, : v.size(0)] = v
+                    batch[key] = padded
+            if "labels" not in batch:
+                batch["labels"] = batch["input_ids"].clone()
+                # Mask padding so it does not contribute to the loss
+                batch["labels"][batch["labels"] == self.pad_token_id] = -100
+            return batch
+
+    pad_token_id = processor.tokenizer.pad_token_id or 0
+    data_collator = _VisionDataCollator(pad_token_id)
 
     training_args = TrainingArguments(
         output_dir=config.output_dir,
@@ -336,11 +411,10 @@ def train(config: TrainingConfig):
         gradient_accumulation_steps=config.gradient_accumulation_steps,
         learning_rate=config.learning_rate,
         num_train_epochs=config.num_train_epochs,
-        warmup_ratio=config.warmup_ratio,
+        warmup_steps=config.warmup_steps,
         lr_scheduler_type=config.lr_scheduler_type,
         weight_decay=config.weight_decay,
         max_grad_norm=config.max_grad_norm,
-        logging_dir=os.path.join(config.output_dir, "logs"),
         max_steps=5 if config.smoke_test else -1,
         logging_steps=1 if config.smoke_test else config.logging_steps,
         save_steps=config.save_steps if not config.smoke_test else 9999,
@@ -357,6 +431,7 @@ def train(config: TrainingConfig):
         report_to="tensorboard",
         remove_unused_columns=False,
         optim="adamw_torch",
+        gradient_checkpointing=True,
         logging_first_step=True,
     )
 
@@ -413,6 +488,12 @@ def main():
     )
 
     parser.add_argument(
+        "--base-model",
+        type=str,
+        default="llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
+        help="HuggingFace model ID or local path to the base model",
+    )
+    parser.add_argument(
         "--data-path",
         type=str,
         default="./training_data",
@@ -430,6 +511,18 @@ def main():
     parser.add_argument("--batch-size", type=int, default=2, help="Batch size")
     parser.add_argument("--lr", type=float, default=1e-5, help="Learning rate")
     parser.add_argument(
+        "--max-image-size",
+        type=int,
+        default=768,
+        help=(
+            "Cap the longest image edge (pixels) before AnyRes tiling. "
+            "Must align with a processor pinpoint (384, 768, 1152, 1536, …). "
+            "768 → 2×2 grid (4 tiles, ~820 tokens); "
+            "1152 → 3×3 grid (9 tiles, ~1960 tokens). "
+            "Use 384 for a single tile when VRAM is tight."
+        ),
+    )
+    parser.add_argument(
         "--smoke-test",
         action="store_true",
         help="Run a minimal 5-step pass to verify the pipeline before a full training run",
@@ -438,6 +531,7 @@ def main():
     args = parser.parse_args()
 
     config = TrainingConfig(
+        base_model=args.base_model,
         data_path=args.data_path,
         output_dir=args.output_dir,
         lora_rank=args.rank,
@@ -445,6 +539,7 @@ def main():
         num_train_epochs=args.epochs,
         per_device_batch_size=args.batch_size,
         learning_rate=args.lr,
+        max_image_size=args.max_image_size,
         smoke_test=args.smoke_test,
     )
 
