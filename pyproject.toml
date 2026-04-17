@@ -1,0 +1,24 @@
+[project]
+name = "llava-onevision-qwen2-0.5b-ov-hf-lora-kobudo"
+version = "1.0.0"
+description = "AI-powered image classifier for human detection and gender classification"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "torch",
+    "torchvision",
+    "transformers",
+    "peft",
+    "Pillow",
+    "numpy",
+    "tensorboard",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu130" }
+torchvision = { index = "pytorch-cu130" }
