@@ -18,8 +18,7 @@ import torch
 from PIL import Image
 
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
@@ -39,7 +38,7 @@ def interactive_inference(
         base_model,
         trust_remote_code=True,
         torch_dtype=torch.bfloat16,
-        device_map="auto"
+        device_map="auto",
     )
 
     processor = AutoProcessor.from_pretrained(base_model, trust_remote_code=True)
@@ -48,7 +47,9 @@ def interactive_inference(
         model = PeftModel.from_pretrained(model, lora_dir)
         logger.info(f"Loaded LoRA adapter from {lora_dir}")
     else:
-        logger.warning(f"LoRA directory not found: {lora_dir}. Running base model only.")
+        logger.warning(
+            f"LoRA directory not found: {lora_dir}. Running base model only."
+        )
 
     model.eval()
 
@@ -61,14 +62,14 @@ def interactive_inference(
         try:
             image_path = input("Image path: ").strip()
 
-            if image_path.lower() in ['quit', 'exit', 'q']:
+            if image_path.lower() in ["quit", "exit", "q"]:
                 break
 
             if not os.path.exists(image_path):
                 print(f"File not found: {image_path}")
                 continue
 
-            image = Image.open(image_path).convert('RGB')
+            image = Image.open(image_path).convert("RGB")
 
             prompt = (
                 "You are an expert in Okinawan martial arts equipment. "
@@ -87,7 +88,7 @@ def interactive_inference(
                     max_new_tokens=max_new_tokens,
                     temperature=temperature,
                     top_p=top_p,
-                    do_sample=True
+                    do_sample=True,
                 )
 
             response = processor.batch_decode(outputs, skip_special_tokens=True)[0]
@@ -111,31 +112,25 @@ def main():
         "--base-model",
         type=str,
         default="llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
-        help="HuggingFace model ID or local path of the base model"
+        help="HuggingFace model ID or local path of the base model",
     )
     parser.add_argument(
         "--lora-dir",
         type=str,
         default="./output/kobudo_lora/final",
-        help="Path to the saved LoRA adapter directory"
+        help="Path to the saved LoRA adapter directory",
     )
     parser.add_argument(
         "--max-new-tokens",
         type=int,
         default=512,
-        help="Maximum number of tokens to generate"
+        help="Maximum number of tokens to generate",
     )
     parser.add_argument(
-        "--temperature",
-        type=float,
-        default=0.1,
-        help="Sampling temperature"
+        "--temperature", type=float, default=0.1, help="Sampling temperature"
     )
     parser.add_argument(
-        "--top-p",
-        type=float,
-        default=0.9,
-        help="Top-p (nucleus) sampling probability"
+        "--top-p", type=float, default=0.9, help="Top-p (nucleus) sampling probability"
     )
 
     args = parser.parse_args()

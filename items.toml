@@ -1,0 +1,64 @@
+# items.toml — Caption data for Okinawan martial arts item recognition
+#
+# Structure
+# ---------
+# [general]
+#   Contains shared text used when building captions:
+#     fallback_caption  — used when no filename keyword matches any item
+#     prompt_prefix     — prepended to each matched item description
+#
+# [<category>]   (e.g. [kobudo], [karate], or any name you add)
+#   Each key is a lowercase keyword that is searched for inside the image
+#   filename (underscores and hyphens are treated as spaces before matching).
+#   The value is a plain-English description appended to prompt_prefix.
+#
+# Adding items
+# ------------
+# Simply add a new key = "description" line to an existing category section,
+# or create a new section (e.g. [judo]) and add keys there.
+# All non-[general] sections are merged into one lookup table at runtime,
+# so category names exist only for human organisation — they carry no
+# special meaning to the loader.
+
+[general]
+fallback_caption = "Describe this Okinawan martial arts equipment in detail, including its name, type, traditional use, and any distinguishing features. Respond in English only."
+prompt_prefix    = "Describe this Okinawan martial arts item in detail."
+
+# ---------------------------------------------------------------------------
+# Kobudo — traditional Okinawan weapons
+# ---------------------------------------------------------------------------
+[kobudo]
+tonfa        = "Traditional Okinawan tonfa, a wooden baton with a perpendicular handle used in kobudo martial arts for striking and blocking techniques"
+sai          = "Sai, a traditional three-pronged Okinawan metal truncheon used in kobudo as a defensive and striking weapon"
+bo           = "Bo staff, a six-foot wooden staff, the most fundamental weapon in Okinawan kobudo for developing strength and coordination"
+nunchaku     = "Nunchaku, two wooden sticks connected by rope or chain, adapted from agricultural rice flails for karate and kobudo training"
+kama         = "Kama, a traditional Okinawan sickle weapon with a curved blade used in kobudo for slashing and trapping techniques"
+eiku         = "Eiku, an Okinawan boat oar converted into a weapon featuring a long handle with a flat paddle end"
+tekko        = "Tekko, traditional Okinawan metal knuckles worn on the hand for striking in karate and kobudo"
+timbe        = "Timbe, a short Okinawan staff with a curved end used in traditional kobudo"
+surujin      = "Surujin, rope dart consisting of a length of rope with a dart attached for striking and entangling"
+kuwa         = "Kuwa, a farming pitchfork adapted into a kobudo weapon with multiple prongs"
+unku         = "Unku, an Okinawan staff weapon with a hook on one end"
+rochin       = "Rochin, a short Okinawan spear with a leaf-shaped blade"
+jutte        = "Jutte, a metal truncheon with a hook used in traditional martial arts"
+tanbo        = "Tanbo, a short staff used in martial arts training"
+sanshakubo   = "Sanshakubo, a three-foot wooden staff used in Okinawan kobudo"
+bokken       = "Bokken, a wooden training sword used in karate and kobudo dojos"
+shi          = "Shi, a short metal staff or rod weapon"
+sansetsukon  = "Sansetsukon, a three-section staff with three sticks connected by rope"
+jo           = "Jo staff, a four-foot short staff used in Japanese martial arts"
+shaken       = "Shaken, a metal fan weapon used in some kobudo styles"
+
+# ---------------------------------------------------------------------------
+# Karate — training equipment and gear
+# ---------------------------------------------------------------------------
+[karate]
+makiwara      = "Makiwara, a traditional karate striking board for developing focused striking power and technique"
+bosu          = "Bosu, a balance training device used in martial arts for developing core strength and stability"
+heavybag      = "Heavy bag for striking practice in karate training"
+focusmitt     = "Focus mitts used by training partners for precision striking practice"
+kick shield   = "Kick shield, a large padded target for kicking practice in karate"
+double end bag = "Double end bag, a small suspended ball for developing timing and reflexes"
+gi            = "Karate gi, traditional training uniform made of heavy cotton for karate practice"
+belt          = "Belt, colored rank indicator in karate representing skill level and experience"
+punching bag  = "Punching bag for developing power and technique in karate"

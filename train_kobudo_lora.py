@@ -8,27 +8,53 @@ Base Model: llava-hf/llava-onevision-qwen2-0.5b-ov-hf
 Data Format: Folder-based images
 Language: English only
 
-Requirements:
-    uv venv
-    uv pip install -r requirements.txt
-    python train_kobudo_lora.py
+Usage:
+    Full training run (default hyperparameters):
+        uv run python train_kobudo_lora.py
 
-Author: MiniMax Agent
+    Smoke test — verifies the full pipeline in ~5 steps before committing to a long run:
+        uv run python train_kobudo_lora.py --smoke-test
+
+    Custom training:
+        uv run python train_kobudo_lora.py --data-path ./my_images --epochs 5 --lr 5e-5
+
+Smoke test mode
+---------------
+Pass --smoke-test to do a quick sanity check without wasting GPU hours. It caps
+the dataset at 8 samples, limits training to 5 optimizer steps, reduces sequence
+length and batch size, and skips saving the final model. Every stage of the
+pipeline (data loading, tokenisation, forward pass, backward pass, evaluation)
+is exercised so any configuration error surfaces immediately.
+
+Item definitions:
+    Edit items.toml to add, remove, or re-categorise kobudo/karate items
+    without touching this script.
+
+Requirements:
+    uv sync
 """
 
 import os
-import sys
 import json
+import tomllib
 import argparse
+from functools import lru_cache
 from pathlib import Path
 from dataclasses import dataclass
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import logging
+
+import torch
+from PIL import Image
+from torch.utils.data import Dataset
+
+# Path to the TOML file that defines item keywords and their descriptions.
+# Edit items.toml to add, remove, or re-categorise items without touching code.
+_ITEMS_TOML = Path(__file__).parent / "items.toml"
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
@@ -36,35 +62,44 @@ logger = logging.getLogger(__name__)
 @dataclass
 class TrainingConfig:
     """Configuration for LoRA training - optimized for 12GB VRAM"""
+
     base_model: str = "llava-hf/llava-onevision-qwen2-0.5b-ov-hf"
-    lora_rank: int = 16
+    lora_rank: int = 32
     lora_alpha: int = 32
-    lora_dropout: float = 0.05
-    lora_target_modules: List[str] = None
+    lora_dropout: float = 0.1
+    lora_target_modules: Optional[List[str]] = None
     per_device_batch_size: int = 1
     gradient_accumulation_steps: int = 8
-    learning_rate: float = 1e-4
+    learning_rate: float = 1e-5
     num_train_epochs: int = 3
-    warmup_steps: int = 100
+    warmup_ratio: float = 0.03
     weight_decay: float = 0.01
-    max_grad_norm: float = 0.3
+    max_grad_norm: float = 0.5
     data_path: str = "./training_data"
     output_dir: str = "./output/kobudo_lora"
     max_new_tokens: int = 512
+    max_seq_length: int = 8192
     temperature: float = 0.1
     top_p: float = 0.9
     mixed_precision: str = "bf16"
+    lr_scheduler_type: str = "cosine"
     logging_steps: int = 10
-    save_steps: int = 500
-    eval_steps: int = 500
+    save_steps: int = 50
+    eval_steps: int = 50
     seed: int = 42
     num_workers: int = 2
+    smoke_test: bool = False
 
     def __post_init__(self):
         if self.lora_target_modules is None:
             self.lora_target_modules = [
-                "q_proj", "k_proj", "v_proj", "o_proj",
-                "gate_proj", "up_proj", "down_proj"
+                "q_proj",
+                "k_proj",
+                "v_proj",
+                "o_proj",
+                "gate_proj",
+                "up_proj",
+                "down_proj",
             ]
 
 
@@ -80,64 +115,54 @@ def set_seed(seed: int):
     torch.cuda.manual_seed_all(seed)
 
 
+@lru_cache(maxsize=1)
+def _load_items() -> tuple[dict[str, str], str, str]:
+    """
+    Load item keywords and caption text from items.toml (read once, then cached).
+
+    Returns:
+        items    — merged dict of keyword -> description from all non-[general] sections
+        fallback — caption used when no keyword matches the filename
+        prefix   — short string prepended to every matched-item caption
+    """
+    with open(_ITEMS_TOML, "rb") as f:
+        data = tomllib.load(f)
+
+    general = data.get("general", {})
+    fallback = general.get(
+        "fallback_caption",
+        "Describe this Okinawan martial arts equipment in detail, "
+        "including its name, type, traditional use, and any distinguishing "
+        "features. Respond in English only.",
+    )
+    prefix = general.get(
+        "prompt_prefix", "Describe this Okinawan martial arts item in detail."
+    )
+
+    items: dict[str, str] = {}
+    for section, entries in data.items():
+        if section != "general" and isinstance(entries, dict):
+            items.update(entries)
+
+    return items, fallback, prefix
+
+
 def auto_generate_caption(filename: str) -> str:
     """
     Generate English caption based on filename for kobudo/karate items.
-    Specializes the model to recognize and describe Okinawan martial arts equipment.
+    Keywords and descriptions are loaded from items.toml; all category
+    sections are merged into one lookup so the file stays the single source
+    of truth for item data.
     """
-    filename_lower = filename.lower().replace('_', ' ').replace('-', ' ')
+    filename_lower = filename.lower().replace("_", " ").replace("-", " ")
 
-    # Kobudo weapons and equipment
-    kobudo_items = {
-        'tonfa': 'Traditional Okinawan tonfa, a wooden baton with a perpendicular handle used in kobudo martial arts for striking and blocking techniques',
-        'sai': 'Sai, a traditional three-pronged Okinawan metal truncheon used in kobudo as a defensive and striking weapon',
-        'bo': 'Bo staff, a six-foot wooden staff, the most fundamental weapon in Okinawan kobudo for developing strength and coordination',
-        'nunchaku': 'Nunchaku, two wooden sticks connected by rope or chain, adapted from agricultural rice flails for karate and kobudo training',
-        'kama': 'Kama, a traditional Okinawan sickle weapon with a curved blade used in kobudo for slashing and trapping techniques',
-        'eiku': 'Eiku, an Okinawan boat oar converted into a weapon featuring a long handle with a flat paddle end',
-        'tekko': 'Tekko, traditional Okinawan metal knuckles worn on the hand for striking in karate and kobudo',
-        'timbe': 'Timbe, a short Okinawan staff with a curved end used in traditional kobudo',
-        'surujin': 'Surujin, rope dart consisting of a length of rope with a dart attached for striking and entangling',
-        'kuwa': 'Kuwa, a farming pitchfork adapted into a kobudo weapon with multiple prongs',
-        'unku': 'Unku, an Okinawan staff weapon with a hook on one end',
-        'rochin': 'Rochin, a short Okinawan spear with a leaf-shaped blade',
-        'jutte': 'Jutte, a metal truncheon with a hook used in traditional martial arts',
-        'tanbo': 'Tanbo, a short staff used in martial arts training',
-        'sanshakubo': 'Sanshakubo, a three-foot wooden staff used in Okinawan kobudo',
-        'bokken': 'Bokken, a wooden training sword used in karate and kobudo dojos',
-        'shi': 'Shi, a short metal staff or rod weapon',
-        'sansetsukon': 'Sansetsukon, a three-section staff with three sticks connected by rope',
-        'jo': 'Jo staff, a four-foot short staff used in Japanese martial arts',
-        'shaken': 'Shaken, a metal fan weapon used in some kobudo styles'
-    }
+    items, fallback, prefix = _load_items()
 
-    # Karate equipment
-    karate_items = {
-        'makiwara': 'Makiwara, a traditional karate striking board for developing focused striking power and technique',
-        'bosu': 'Bosu, a balance training device used in martial arts for developing core strength and stability',
-        'heavybag': 'Heavy bag for striking practice in karate training',
-        'focusmitt': 'Focus mitts used by training partners for precision striking practice',
-        'kick shield': 'Kick shield, a large padded target for kicking practice in karate',
-        'double end bag': 'Double end bag, a small suspended ball for developing timing and reflexes',
-        'gi': 'Karate gi, traditional training uniform made of heavy cotton for karate practice',
-        'belt': 'Belt, colored rank indicator in karate representing skill level and experience',
-        'punching bag': 'Punching bag for developing power and technique in karate'
-    }
-
-    all_items = {**kobudo_items, **karate_items}
-
-    # Check for matches in filename
-    for item_name, description in all_items.items():
+    for item_name, description in items.items():
         if item_name in filename_lower:
-            return f"Describe this Okinawan martial arts item in detail. {description}"
+            return f"{prefix} {description}"
 
-    # Generic English-only caption
-    return "Describe this Okinawan martial arts equipment in detail, including its name, type, traditional use, and any distinguishing features. Respond in English only."
-
-
-from torch.utils.data import Dataset
-import torch
-from PIL import Image
+    return fallback
 
 
 class KobudoDataset(Dataset):
@@ -147,13 +172,13 @@ class KobudoDataset(Dataset):
         self.image_folder = Path(image_folder)
         self.processor = processor
         self.max_length = max_length
-        self.image_extensions = {'.jpg', '.jpeg', '.png', '.webp', '.bmp'}
+        self.image_extensions = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 
         # Find all images
         self.image_files = []
         for ext in self.image_extensions:
-            self.image_files.extend(self.image_folder.glob(f'*{ext}'))
-            self.image_files.extend(self.image_folder.glob(f'*{ext.upper()}'))
+            self.image_files.extend(self.image_folder.glob(f"*{ext}"))
+            self.image_files.extend(self.image_folder.glob(f"*{ext.upper()}"))
 
         self.image_files = sorted(self.image_files)
 
@@ -172,10 +197,10 @@ class KobudoDataset(Dataset):
         image_path = self.image_files[idx]
 
         try:
-            image = Image.open(image_path).convert('RGB')
+            image = Image.open(image_path).convert("RGB")
         except Exception as e:
             logger.warning(f"Failed to load {image_path}: {e}")
-            image = Image.new('RGB', (336, 336), color='black')
+            image = Image.new("RGB", (336, 336), color="black")
 
         # Generate English caption
         caption = auto_generate_caption(image_path.stem)
@@ -186,7 +211,7 @@ class KobudoDataset(Dataset):
             return_tensors="pt",
             padding=True,
             truncation=True,
-            max_length=self.max_length
+            max_length=self.max_length,
         )
 
         return {k: v.squeeze(0) if v.dim() > 1 else v for k, v in inputs.items()}
@@ -194,15 +219,12 @@ class KobudoDataset(Dataset):
 
 def load_model_and_processor(config: TrainingConfig):
     """Load model and processor with LoRA applied"""
-    from transformers import AutoProcessor, AutoModelForVision2Seq
+    from transformers import AutoProcessor, AutoModelForVision2Seq  # type: ignore[attr-defined]
     from peft import LoraConfig, get_peft_model
 
     logger.info(f"Loading base model: {config.base_model}")
 
-    processor = AutoProcessor.from_pretrained(
-        config.base_model,
-        trust_remote_code=True
-    )
+    processor = AutoProcessor.from_pretrained(config.base_model, trust_remote_code=True)
 
     torch_dtype = torch.bfloat16 if config.mixed_precision == "bf16" else torch.float16
 
@@ -230,14 +252,21 @@ def load_model_and_processor(config: TrainingConfig):
         if p.requires_grad:
             trainable_params += p.numel()
 
-    logger.info(f"Trainable: {trainable_params:,} / {total_params:,} ({100*trainable_params/total_params:.2f}%)")
+    logger.info(
+        f"Trainable: {trainable_params:,} / {total_params:,} ({100 * trainable_params / total_params:.2f}%)"
+    )
 
     return model, processor
 
 
 def train(config: TrainingConfig):
     """Main training function"""
-    from transformers import TrainingArguments, Trainer, DataCollatorForVision2Seq, set_seed
+    from transformers import (
+        TrainingArguments,
+        Trainer,
+        DataCollatorForVision2Seq,
+        set_seed,
+    )  # type: ignore[attr-defined]
     from torch.utils.data import Subset
     import random
 
@@ -250,11 +279,24 @@ def train(config: TrainingConfig):
     logger.info("=" * 60)
 
     set_seed(config.seed)
+
+    if config.smoke_test:
+        logger.warning("!" * 60)
+        logger.warning("SMOKE TEST MODE — minimal run to verify pipeline integrity")
+        logger.warning("!" * 60)
+        config.per_device_batch_size = 1
+        config.gradient_accumulation_steps = 1
+        config.max_seq_length = 512
+        config.num_workers = 0
+        config.output_dir = str(Path(config.output_dir).parent / "smoke_test")
+
     os.makedirs(config.output_dir, exist_ok=True)
 
     # Save config
-    config_dict = {k: v if not isinstance(v, list) else v for k, v in config.__dict__.items()}
-    with open(os.path.join(config.output_dir, "config.json"), 'w') as f:
+    config_dict = {
+        k: v if not isinstance(v, list) else v for k, v in config.__dict__.items()
+    }
+    with open(os.path.join(config.output_dir, "config.json"), "w") as f:
         json.dump(config_dict, f, indent=2)
 
     model, processor = load_model_and_processor(config)
@@ -265,13 +307,17 @@ def train(config: TrainingConfig):
         image_folder = config.data_path
 
     logger.info(f"Loading images from: {image_folder}")
-    full_dataset = KobudoDataset(image_folder, processor)
+    full_dataset = KobudoDataset(
+        image_folder, processor, max_length=config.max_seq_length
+    )
 
     # Split train/eval 90/10
-    eval_size = min(len(full_dataset) // 10, 50)
-    train_size = len(full_dataset) - eval_size
     indices = list(range(len(full_dataset)))
     random.shuffle(indices)
+    if config.smoke_test:
+        indices = indices[: min(8, len(indices))]
+    eval_size = max(1, min(len(indices) // 10, 50))
+    train_size = len(indices) - eval_size
 
     train_dataset = Subset(full_dataset, indices[:train_size])
     eval_dataset = Subset(full_dataset, indices[train_size:])
@@ -279,7 +325,9 @@ def train(config: TrainingConfig):
     logger.info(f"Training samples: {len(train_dataset)}")
     logger.info(f"Evaluation samples: {len(eval_dataset)}")
 
-    data_collator = DataCollatorForVision2Seq(processor=processor, model=model, padding=True)
+    data_collator = DataCollatorForVision2Seq(
+        processor=processor, model=model, padding=True
+    )
 
     training_args = TrainingArguments(
         output_dir=config.output_dir,
@@ -288,16 +336,18 @@ def train(config: TrainingConfig):
         gradient_accumulation_steps=config.gradient_accumulation_steps,
         learning_rate=config.learning_rate,
         num_train_epochs=config.num_train_epochs,
-        warmup_steps=config.warmup_steps,
+        warmup_ratio=config.warmup_ratio,
+        lr_scheduler_type=config.lr_scheduler_type,
         weight_decay=config.weight_decay,
         max_grad_norm=config.max_grad_norm,
         logging_dir=os.path.join(config.output_dir, "logs"),
-        logging_steps=config.logging_steps,
-        save_steps=config.save_steps,
-        eval_steps=config.eval_steps,
-        evaluation_strategy="steps",
-        save_total_limit=3,
-        load_best_model_at_end=True,
+        max_steps=5 if config.smoke_test else -1,
+        logging_steps=1 if config.smoke_test else config.logging_steps,
+        save_steps=config.save_steps if not config.smoke_test else 9999,
+        eval_steps=2 if config.smoke_test else config.eval_steps,
+        eval_strategy="steps",
+        save_total_limit=0 if config.smoke_test else 3,
+        load_best_model_at_end=not config.smoke_test,
         metric_for_best_model="eval_loss",
         greater_is_better=False,
         bf16=(config.mixed_precision == "bf16"),
@@ -326,6 +376,10 @@ def train(config: TrainingConfig):
         logger.error(f"Training error: {e}")
         raise
 
+    if config.smoke_test:
+        logger.info("Smoke test passed — pipeline is healthy. No model saved.")
+        return model, processor
+
     # Save final model
     logger.info("Saving final model...")
     trainer.save_model(os.path.join(config.output_dir, "final"))
@@ -339,10 +393,10 @@ def train(config: TrainingConfig):
         "eval_samples": len(eval_dataset),
         "num_epochs": config.num_train_epochs,
         "lora_rank": config.lora_rank,
-        "completed": True
+        "completed": True,
     }
 
-    with open(os.path.join(config.output_dir, "training_summary.json"), 'w') as f:
+    with open(os.path.join(config.output_dir, "training_summary.json"), "w") as f:
         json.dump(summary, f, indent=2)
 
     logger.info("=" * 60)
@@ -358,15 +412,28 @@ def main():
         description="Train LoRA for Kobudo/Karate Item Recognition (English only)"
     )
 
-    parser.add_argument("--data-path", type=str, default="./training_data",
-                       help="Path to training data folder")
-    parser.add_argument("--output-dir", type=str, default="./output/kobudo_lora",
-                       help="Output directory")
-    parser.add_argument("--rank", type=int, default=16, help="LoRA rank")
+    parser.add_argument(
+        "--data-path",
+        type=str,
+        default="./training_data",
+        help="Path to training data folder",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="./output/kobudo_lora",
+        help="Output directory",
+    )
+    parser.add_argument("--rank", type=int, default=32, help="LoRA rank")
     parser.add_argument("--alpha", type=int, default=32, help="LoRA alpha")
     parser.add_argument("--epochs", type=int, default=3, help="Training epochs")
-    parser.add_argument("--batch-size", type=int, default=1, help="Batch size")
-    parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
+    parser.add_argument("--batch-size", type=int, default=2, help="Batch size")
+    parser.add_argument("--lr", type=float, default=1e-5, help="Learning rate")
+    parser.add_argument(
+        "--smoke-test",
+        action="store_true",
+        help="Run a minimal 5-step pass to verify the pipeline before a full training run",
+    )
 
     args = parser.parse_args()
 
@@ -377,7 +444,8 @@ def main():
         lora_alpha=args.alpha,
         num_train_epochs=args.epochs,
         per_device_batch_size=args.batch_size,
-        learning_rate=args.lr
+        learning_rate=args.lr,
+        smoke_test=args.smoke_test,
     )
 
     train(config)

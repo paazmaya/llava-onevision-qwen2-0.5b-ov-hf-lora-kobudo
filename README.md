@@ -6,10 +6,10 @@ LoRA fine-tuning of [llava-hf/llava-onevision-qwen2-0.5b-ov-hf](https://huggingf
 
 The script fine-tunes the LLaVA-OneVision vision-language model using Low-Rank Adaptation (LoRA) so that it can identify and describe kobudo weapons (tonfa, sai, bo, nunchaku, kama, etc.) and karate equipment (makiwara, gi, heavy bag, etc.) from images. Responses are English-only.
 
-Two modes are available:
+Two scripts are available:
 
 - **train** — Fine-tunes the model on a local folder of images and saves the LoRA adapter.
-- **interactive** — Available as a separate script (`infer_kobudo.py`). Loads the saved adapter and lets you query it interactively with image paths.
+- **inference** — Available as a separate script (`infer_kobudo.py`). Loads the saved adapter and lets you query it interactively with image paths.
 
 ### Training details
 
@@ -41,6 +41,15 @@ Place your images inside a folder. The script looks for images first in `<data-p
 Captions are generated automatically from filenames. If the filename contains a known weapon or equipment name (e.g. `tonfa_01.jpg`) the model receives a detailed description of that item as its training prompt. Unknown filenames receive a generic prompt.
 
 Default data path: `./training_data`
+
+```
+training_data/
+└── images/
+    ├── tonfa_001.jpg
+    ├── sai_weapon.jpg
+    ├── bo_staff.png
+    └── ...
+```
 
 ## How to run
 
@@ -88,3 +97,7 @@ After training the following files are written to `--output-dir`:
 - `training_summary.json` — final statistics (sample counts, epochs, etc.)
 - `final/` — the saved LoRA adapter and processor, ready for `PeftModel.from_pretrained`
 - `logs/` — TensorBoard event files
+
+## License
+
+Apache-2.0
