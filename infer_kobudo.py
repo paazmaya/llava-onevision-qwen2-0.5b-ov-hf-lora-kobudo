@@ -7,7 +7,7 @@ Optimized for: Windows 11, NVIDIA RTX 4070 (12GB VRAM)
 Base Model: llava-hf/llava-onevision-qwen2-0.5b-ov-hf
 
 Usage:
-    python infer_kobudo.py --lora-dir ./output/kobudo_lora/final
+    uv run python infer_kobudo.py --lora-dir ./output/kobudo_lora/final
 """
 
 import os
@@ -71,11 +71,25 @@ def interactive_inference(
 
             image = Image.open(image_path).convert("RGB")
 
-            prompt = (
-                "You are an expert in Okinawan martial arts equipment. "
-                "Describe this item in detail, including its name, type, "
-                "traditional use, and any distinguishing features. "
-                "Respond in English only."
+            conversation = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image"},
+                        {
+                            "type": "text",
+                            "text": (
+                                "You are an expert in Okinawan martial arts equipment. "
+                                "Describe this item in detail, including its name, type, "
+                                "traditional use, and any distinguishing features. "
+                                "Respond in English only."
+                            ),
+                        },
+                    ],
+                }
+            ]
+            prompt = processor.apply_chat_template(
+                conversation, add_generation_prompt=True
             )
 
             inputs = processor(text=[prompt], images=[image], return_tensors="pt")

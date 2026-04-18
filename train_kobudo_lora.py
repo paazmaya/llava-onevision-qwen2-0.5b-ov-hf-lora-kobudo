@@ -155,6 +155,9 @@ def _load_items() -> tuple[dict[str, str], str, str, str]:
         if section != "general" and isinstance(entries, dict):
             items.update(entries)
 
+    # Sort longest keys first so "manjisai" is checked before "sai", etc.
+    items = dict(sorted(items.items(), key=lambda kv: len(kv[0]), reverse=True))
+
     return items, user_question, answer_prefix, fallback_answer
 
 
@@ -186,21 +189,41 @@ class KobudoDataset(Dataset):
         self.max_image_size = max_image_size
         self.image_extensions = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 
-        # Find all images
+        # Find all images recursively
         self.image_files = []
         for ext in self.image_extensions:
-            self.image_files.extend(self.image_folder.glob(f"*{ext}"))
-            self.image_files.extend(self.image_folder.glob(f"*{ext.upper()}"))
+            self.image_files.extend(self.image_folder.rglob(f"*{ext}"))
+            self.image_files.extend(self.image_folder.rglob(f"*{ext.upper()}"))
 
-        self.image_files = sorted(self.image_files)
+        self.image_files = sorted(set(self.image_files))
 
         if len(self.image_files) == 0:
             raise ValueError(
-                f"No images found in {image_folder}. "
+                f"No images found under {image_folder}. "
                 f"Supported formats: JPG, JPEG, PNG, WebP, BMP"
             )
 
-        logger.info(f"Found {len(self.image_files)} images in {image_folder}")
+        logger.info(f"Found {len(self.image_files)} images under {image_folder}")
+
+        # Per-key stats
+        items = _load_items()[0]
+        counts: dict[str, int] = {key: 0 for key in items}
+        unmatched = 0
+        for img in self.image_files:
+            stem_lower = img.stem.lower().replace("_", " ").replace("-", " ")
+            matched = False
+            for key in items:
+                if key in stem_lower:
+                    counts[key] += 1
+                    matched = True
+                    break
+            if not matched:
+                unmatched += 1
+        for key, count in counts.items():
+            if count > 0:
+                logger.info(f"  {key}: {count} image(s)")
+        if unmatched:
+            logger.info(f"  (unmatched): {unmatched} image(s)")
 
     def __len__(self) -> int:
         return len(self.image_files)
@@ -304,6 +327,52 @@ def load_model_and_processor(config: TrainingConfig):
     return model, processor
 
 
+class _VisionDataCollator:
+    """Pads 1-D sequence tensors and stacks higher-dim tensors (e.g. pixel_values).
+    Sets padding positions in labels to -100 so they are ignored by the loss.
+    """
+
+    def __init__(self, pad_token_id: int):
+        self.pad_token_id = pad_token_id
+
+    def __call__(self, features: list[dict]) -> dict[str, torch.Tensor]:
+        batch: dict[str, torch.Tensor] = {}
+        for key in features[0]:
+            vals = [f[key] for f in features]
+            if vals[0].dim() > 1:
+                # pixel_values has shape [num_tiles, C, H, W] where num_tiles varies
+                # per image depending on AnyRes tiling. Pad dim 0 to the max tile
+                # count in this batch; image_sizes and other fixed-shape tensors
+                # will all have identical shapes and take the fast path.
+                shapes = [v.shape for v in vals]
+                if len(set(shapes)) == 1:
+                    batch[key] = torch.stack(vals)
+                else:
+                    max_dim0 = max(v.size(0) for v in vals)
+                    padded_vals = []
+                    for v in vals:
+                        if v.size(0) < max_dim0:
+                            pad = torch.zeros(
+                                (max_dim0 - v.size(0), *v.shape[1:]), dtype=v.dtype
+                            )
+                            v = torch.cat([v, pad], dim=0)
+                        padded_vals.append(v)
+                    batch[key] = torch.stack(padded_vals)
+            else:
+                # 1-D sequence tensors — pad to the longest in this batch
+                max_len = max(v.size(0) for v in vals)
+                fill = self.pad_token_id if key == "input_ids" else 0
+                padded = torch.full((len(vals), max_len), fill, dtype=vals[0].dtype)
+                for i, v in enumerate(vals):
+                    padded[i, : v.size(0)] = v
+                batch[key] = padded
+        if "labels" not in batch:
+            batch["labels"] = batch["input_ids"].clone()
+            # Mask padding so it does not contribute to the loss
+            batch["labels"][batch["labels"] == self.pad_token_id] = -100
+        return batch
+
+
 def train(config: TrainingConfig):
     """Main training function"""
     from transformers import (
@@ -328,10 +397,14 @@ def train(config: TrainingConfig):
         logger.warning("!" * 60)
         logger.warning("SMOKE TEST MODE — minimal run to verify pipeline integrity")
         logger.warning("!" * 60)
-        config.per_device_batch_size = 1
+        # Use batch size 2 so the collator must handle multiple images per batch,
+        # catching variable tile-count stack errors from AnyRes tiling.
+        config.per_device_batch_size = 2
         config.gradient_accumulation_steps = 1
         config.max_seq_length = 512
-        config.num_workers = 0
+        # Keep num_workers=1 (not 0) so the multiprocessing/pickle path is
+        # exercised and unpicklable objects (e.g. local classes) are caught.
+        config.num_workers = 1
         config.output_dir = str(Path(config.output_dir).parent / "smoke_test")
 
     os.makedirs(config.output_dir, exist_ok=True)
@@ -349,13 +422,9 @@ def train(config: TrainingConfig):
     model, processor = load_model_and_processor(config)
 
     # Create dataset
-    image_folder = os.path.join(config.data_path, "images")
-    if not os.path.exists(image_folder):
-        image_folder = config.data_path
-
-    logger.info(f"Loading images from: {image_folder}")
+    logger.info(f"Loading images from: {config.data_path}")
     full_dataset = KobudoDataset(
-        image_folder, processor, max_image_size=config.max_image_size
+        config.data_path, processor, max_image_size=config.max_image_size
     )
 
     # Split train/eval 90/10
@@ -371,35 +440,6 @@ def train(config: TrainingConfig):
 
     logger.info(f"Training samples: {len(train_dataset)}")
     logger.info(f"Evaluation samples: {len(eval_dataset)}")
-
-    class _VisionDataCollator:
-        """Pads 1-D sequence tensors and stacks higher-dim tensors (e.g. pixel_values).
-        Sets padding positions in labels to -100 so they are ignored by the loss.
-        """
-
-        def __init__(self, pad_token_id: int):
-            self.pad_token_id = pad_token_id
-
-        def __call__(self, features: list[dict]) -> dict[str, torch.Tensor]:
-            batch: dict[str, torch.Tensor] = {}
-            for key in features[0]:
-                vals = [f[key] for f in features]
-                if vals[0].dim() > 1:
-                    # pixel_values, image_sizes, etc. — all same shape, just stack
-                    batch[key] = torch.stack(vals)
-                else:
-                    # 1-D sequence tensors — pad to the longest in this batch
-                    max_len = max(v.size(0) for v in vals)
-                    fill = self.pad_token_id if key == "input_ids" else 0
-                    padded = torch.full((len(vals), max_len), fill, dtype=vals[0].dtype)
-                    for i, v in enumerate(vals):
-                        padded[i, : v.size(0)] = v
-                    batch[key] = padded
-            if "labels" not in batch:
-                batch["labels"] = batch["input_ids"].clone()
-                # Mask padding so it does not contribute to the loss
-                batch["labels"][batch["labels"] == self.pad_token_id] = -100
-            return batch
 
     pad_token_id = processor.tokenizer.pad_token_id or 0
     data_collator = _VisionDataCollator(pad_token_id)
