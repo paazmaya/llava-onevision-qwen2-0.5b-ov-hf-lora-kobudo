@@ -164,21 +164,38 @@ def _load_items() -> tuple[dict[str, str], str, str, str]:
     return items, user_question, answer_prefix, fallback_answer
 
 
-def auto_generate_caption(filename: str) -> tuple[str, str]:
+def auto_generate_caption(
+    filename: str,
+    image_path: Optional[Path] = None,
+    base_folder: Optional[Path] = None,
+) -> tuple[str, str]:
     """
     Return (user_question, assistant_answer) for a given image filename.
 
     The question goes in the user turn; the answer goes in the assistant turn
     so the chat template's {% generation %} block marks it as the training
     target. Keywords and descriptions are loaded from items.toml.
+
+    Matching priority:
+      1. Filename begins with a known key followed by ``_`` (or equals the key).
+      2. Any directory component between *base_folder* and the file is an exact
+         key match (case-insensitive).
     """
     filename_lower = filename.lower()
 
     items, user_question, answer_prefix, fallback_answer = _load_items()
 
+    # 1. Filename prefix match
     for item_name, description in items.items():
-        if filename_lower.startswith(item_name + "_"):
+        if filename_lower.startswith(item_name + "_") or filename_lower == item_name:
             return user_question, f"{answer_prefix} {description}"
+
+    # 2. Exact directory name match
+    if image_path is not None and base_folder is not None:
+        for part in image_path.relative_to(base_folder).parts[:-1]:
+            part_lower = part.lower()
+            if part_lower in items:
+                return user_question, f"{answer_prefix} {items[part_lower]}"
 
     return user_question, fallback_answer
 
@@ -192,41 +209,56 @@ class KobudoDataset(Dataset):
         self.max_image_size = max_image_size
         self.image_extensions = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".gif", ".heic", ".heif"}
 
-        # Find all images recursively
-        self.image_files = []
-        for ext in self.image_extensions:
-            self.image_files.extend(self.image_folder.rglob(f"*{ext}"))
-            self.image_files.extend(self.image_folder.rglob(f"*{ext.upper()}"))
+        # Load items before collection so we can filter during discovery.
+        items = _load_items()[0]
+        keys: set[str] = set(items.keys())
 
-        self.image_files = sorted(set(self.image_files))
+        def _key_match(img_path: Path) -> Optional[str]:
+            """Return the first matching key for *img_path*, or None.
+
+            An image is accepted when its filename begins with a key followed
+            by ``_`` (or equals the key), OR when any directory component
+            between *image_folder* and the file is an exact key match.
+            """
+            stem_lower = img_path.stem.lower()
+            # Filename prefix — items are sorted longest-first to avoid
+            # 'sai' matching before 'manjisai'.
+            for key in items:
+                if stem_lower.startswith(key + "_") or stem_lower == key:
+                    return key
+            # Exact directory name match
+            for part in img_path.relative_to(self.image_folder).parts[:-1]:
+                if part.lower() in keys:
+                    return part.lower()
+            return None
+
+        # Find all images recursively, keeping only those that match a key.
+        all_images: list[Path] = []
+        for ext in self.image_extensions:
+            all_images.extend(self.image_folder.rglob(f"*{ext}"))
+            all_images.extend(self.image_folder.rglob(f"*{ext.upper()}"))
+
+        self.image_files = sorted(
+            img for img in set(all_images) if _key_match(img) is not None
+        )
 
         if len(self.image_files) == 0:
             raise ValueError(
-                f"No images found under {image_folder}. "
+                f"No images found under {image_folder} matching any known key. "
                 f"Supported formats: JPG, JPEG, PNG, WebP, BMP, TIFF, GIF, HEIC, HEIF"
             )
 
         logger.info(f"Found {len(self.image_files)} images under {image_folder}")
 
         # Per-key stats
-        items = _load_items()[0]
         counts: dict[str, int] = {key: 0 for key in items}
-        unmatched = 0
         for img in self.image_files:
-            stem_lower = img.stem.lower().replace("_", " ").replace("-", " ")
-            matched = False
-            for key in items:
-                if key in stem_lower:
-                    counts[key] += 1
-                    matched = True
-                    break
-            if not matched:
-                unmatched += 1
+            key = _key_match(img)
+            if key and key in counts:
+                counts[key] += 1
         for key, count in counts.items():
             if count > 0:
                 logger.info(f"  {key}: {count} image(s)")
-        if unmatched:
-            logger.info(f"  (unmatched): {unmatched} image(s)")
 
     def __len__(self) -> int:
         return len(self.image_files)
@@ -252,7 +284,7 @@ class KobudoDataset(Dataset):
         # The chat template's {% generation %} block marks the assistant turn
         # as the only part the model trains on — so the description MUST be
         # in the assistant turn, not the user turn.
-        question, answer = auto_generate_caption(image_path.stem)
+        question, answer = auto_generate_caption(image_path.stem, image_path, self.image_folder)
 
         conversation = [
             {
