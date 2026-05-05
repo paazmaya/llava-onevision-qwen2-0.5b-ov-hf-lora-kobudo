@@ -169,12 +169,12 @@ def auto_generate_caption(filename: str) -> tuple[str, str]:
     so the chat template's {% generation %} block marks it as the training
     target. Keywords and descriptions are loaded from items.toml.
     """
-    filename_lower = filename.lower().replace("_", " ").replace("-", " ")
+    filename_lower = filename.lower()
 
     items, user_question, answer_prefix, fallback_answer = _load_items()
 
     for item_name, description in items.items():
-        if item_name in filename_lower:
+        if filename_lower.startswith(item_name + "_"):
             return user_question, f"{answer_prefix} {description}"
 
     return user_question, fallback_answer

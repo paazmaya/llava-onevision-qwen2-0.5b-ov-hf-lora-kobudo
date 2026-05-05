@@ -35,11 +35,19 @@ uv venv
 uv sync
 ```
 
+It is a good idea to pull the model locally:
+
+```sh
+hf download llava-hf/llava-onevision-qwen2-0.5b-ov-hf --local-dir "H:\vision-models\llava-onevision-qwen2-0.5b-ov-hf"
+
+hf download llava-hf/llava-onevision-qwen2-7b-ov-hf --local-dir "H:\vision-models\llava-onevision-qwen2-7b-ov-hf"
+```
+
 ## Training data
 
 Place your images inside a folder. The script looks for images first in `<data-path>/images/`, falling back to `<data-path>/` directly. Supported formats: `.jpg`, `.jpeg`, `.png`, `.webp`, `.bmp`.
 
-Captions are generated automatically from filenames. If the filename contains a known weapon or equipment name (e.g. `tonfa_01.jpg`) the model receives a detailed description of that item as its training prompt. Unknown filenames receive a generic prompt.
+Captions are generated automatically from filenames. If the filename starts with a known weapon or equipment name followed by underscore (e.g. `tonfa_01.jpg`) the model receives a detailed description of that item as its training prompt. Unknown filenames receive a generic prompt.
 
 Default data path: `./training_data`
 
@@ -59,6 +67,13 @@ training_data/
 ```bash
 uv run python train_kobudo_lora.py --data-path ./training_data --output-dir ./output/kobudo_lora
 ```
+
+```powershell
+uv run python train_kobudo_lora.py --base-model "H:\vision-models\llava-hf_llava-onevision-qwen2-0.5b-ov-hf" --data-path "C:\Users\Jukka\Dropbox\onevision-lora-kobudo-images" --output-dir ./output/kobudo_lora
+```
+
+
+
 
 All arguments and their defaults:
 
