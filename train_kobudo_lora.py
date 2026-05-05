@@ -283,6 +283,7 @@ def load_model_and_processor(config: TrainingConfig):
     """Load model and processor with LoRA applied"""
     from transformers import AutoProcessor, LlavaOnevisionForConditionalGeneration
     from peft import LoraConfig, get_peft_model
+    from transformers import BitsAndBytesConfig
 
     logger.info(f"Loading base model: {config.base_model}")
 
@@ -290,9 +291,16 @@ def load_model_and_processor(config: TrainingConfig):
 
     torch_dtype = torch.bfloat16 if config.mixed_precision == "bf16" else torch.float16
 
+    # 8-bit quantisation config for the LLM backbone
+    quantization_config = BitsAndBytesConfig(
+        load_in_8bit=True,
+        llm_int8_enable_fp32_cpu_offload=True
+    )
+
     model = LlavaOnevisionForConditionalGeneration.from_pretrained(
         config.base_model,
         trust_remote_code=True,
+        quantization_config=quantization_config,
         torch_dtype=torch_dtype,
         device_map="auto",
     )
