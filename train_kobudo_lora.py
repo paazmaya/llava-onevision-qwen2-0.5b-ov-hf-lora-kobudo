@@ -47,6 +47,9 @@ import logging
 import torch
 from PIL import Image
 from torch.utils.data import Dataset
+import pillow_heif
+
+pillow_heif.register_heif_opener()
 
 # Reduce CUDA memory fragmentation — recommended when hitting OOM on 12 GB cards.
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
@@ -187,7 +190,7 @@ class KobudoDataset(Dataset):
         self.image_folder = Path(image_folder)
         self.processor = processor
         self.max_image_size = max_image_size
-        self.image_extensions = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+        self.image_extensions = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".gif", ".heic", ".heif"}
 
         # Find all images recursively
         self.image_files = []
@@ -200,7 +203,7 @@ class KobudoDataset(Dataset):
         if len(self.image_files) == 0:
             raise ValueError(
                 f"No images found under {image_folder}. "
-                f"Supported formats: JPG, JPEG, PNG, WebP, BMP"
+                f"Supported formats: JPG, JPEG, PNG, WebP, BMP, TIFF, GIF, HEIC, HEIF"
             )
 
         logger.info(f"Found {len(self.image_files)} images under {image_folder}")
@@ -291,10 +294,17 @@ def load_model_and_processor(config: TrainingConfig):
 
     torch_dtype = torch.bfloat16 if config.mixed_precision == "bf16" else torch.float16
 
-    # 8-bit quantisation config for the LLM backbone
+    # 8-bit or 4-bit quantisation
     quantization_config = BitsAndBytesConfig(
-        load_in_8bit=True,
-        llm_int8_enable_fp32_cpu_offload=True
+        #load_in_8bit=True,
+        #llm_int8_enable_fp32_cpu_offload=True
+        # Above are the 8-bit settings
+
+        # Below are the 4-bit settings
+        load_in_4bit=True,
+        bnb_4bit_compute_dtype=torch.bfloat16,
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_quant_type="nf4",
     )
 
     model = LlavaOnevisionForConditionalGeneration.from_pretrained(

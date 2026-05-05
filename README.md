@@ -130,6 +130,160 @@ After training the following files are written to `--output-dir`:
 - `final/` — the saved LoRA adapter and processor, ready for `PeftModel.from_pretrained`
 - `logs/` — TensorBoard event files
 
+## Getting smaller base model
+
+LLaVA-OneVision is a multimodal model — converting it to GGUF requires two
+separate files: a backbone GGUF and a vision-projector (mmproj) GGUF.
+The Python helper scripts (`llava_surgery_v2.py`,
+`convert_image_encoder_to_gguf.py`) are **not bundled** in the Docker image,
+so Steps 1 and 3 must be run locally from a cloned llama.cpp repo.
+
+```powershell
+# One-time clone
+git clone https://github.com/ggml-org/llama.cpp.git C:\Users\Jukka\code\github-other\llama.cpp
+pip install torch safetensors
+pip install C:\Users\Jukka\code\github-other\llama.cpp\gguf-py
+
+# Pull the CUDA-enabled image (needed for Steps 2 and 4)
+docker pull ghcr.io/ggml-org/llama.cpp:full-cuda13
+
+# Step 1 — split out the vision projector and patch the model directory.
+# Writes llava.projector + llava.clip alongside the HF weights and removes
+# tensors that convert_hf_to_gguf.py cannot handle (image_newline, etc.).
+python C:\Users\Jukka\code\github-other\llama.cpp\tools\mtmd\legacy-models\llava_surgery_v2.py `
+    -C -m "H:\vision-models\llava-onevision-qwen2-7b-ov-hf"
+
+# Step 1b — llava_surgery_v2.py extracts image_newline into llava.projector but
+# does NOT remove it from the safetensors shards or the index. Do that manually:
+python -c "
+from safetensors import safe_open
+from safetensors.torch import save_file
+from typing import cast, Any, ContextManager
+import glob, json, os
+
+model_path = r'H:\vision-models\llava-onevision-qwen2-7b-ov-hf'
+
+# Remove from shard
+for path in [f for f in glob.glob(f'{model_path}/*.safetensors') if 'model' in os.path.basename(f)]:
+    tensors = {}
+    with cast(ContextManager[Any], safe_open(path, framework='pt', device='cpu')) as f:
+        for key in f.keys():
+            tensors[key] = f.get_tensor(key).clone()
+    if 'image_newline' in tensors:
+        del tensors['image_newline']
+        save_file(tensors, path)
+        print(f'Removed image_newline from {os.path.basename(path)}')
+
+# Remove from index
+idx_path = f'{model_path}/model.safetensors.index.json'
+with open(idx_path) as f:
+    idx = json.load(f)
+idx['weight_map'].pop('image_newline', None)
+with open(idx_path, 'w') as f:
+    json.dump(idx, f, indent=2)
+print('Index updated.')
+"
+
+# Step 2 — convert the patched LLM backbone to FP16 GGUF.
+# tools.sh is the default entrypoint; --convert delegates to convert_hf_to_gguf.py.
+docker run --gpus all -v "H:\vision-models\:/models" ghcr.io/ggml-org/llama.cpp:full-cuda13 `
+    --convert /models/llava-onevision-qwen2-7b-ov-hf `
+    --outtype f16 `
+    --outfile /models/llava-onevision-qwen2-7b-ov-hf_f16.gguf
+
+# Step 3 — convert the vision projector to its own mmproj GGUF.
+# LLaVA-OneVision uses SigLIP which omits several keys the legacy script requires.
+# Add them from known SigLIP defaults and from the text_config:
+python -c "
+import json
+path = r'H:\vision-models\llava-onevision-qwen2-7b-ov-hf\config.json'
+with open(path) as f: cfg = json.load(f)
+cfg['projection_dim'] = cfg['text_config']['hidden_size']  # 3584
+cfg['vision_config']['layer_norm_eps'] = 1e-6              # SigLIP default
+cfg['vision_config']['hidden_act'] = 'gelu'                # SigLIP activation
+with open(path, 'w') as f: json.dump(cfg, f, indent=2)
+print('Config patched.')
+"
+
+python C:\Users\Jukka\code\github-other\llama.cpp\tools\mtmd\legacy-models\convert_image_encoder_to_gguf.py `
+    --llava-projector "H:\vision-models\llava-onevision-qwen2-7b-ov-hf\llava.projector" `
+    --output-dir "H:\vision-models" `
+    -m "H:\vision-models\llava-onevision-qwen2-7b-ov-hf" `
+    --clip-model-is-openclip
+# Done. Output file: H:\vision-models\mmproj-model-f16.gguf
+
+# Step 4 — quantize the FP16 backbone to the most useful sizes.
+# --quantize delegates to llama-quantize inside the container.
+docker run --gpus all -v "H:\vision-models\:/models" ghcr.io/ggml-org/llama.cpp:full-cuda13 `
+    --quantize /models/llava-onevision-qwen2-7b-ov-hf_f16.gguf `
+    /models/llava-onevision-qwen2-7b-ov-hf_Q4_K_M.gguf Q4_K_M
+# llama_model_quantize_impl: model size  = 14527.15 MiB (16.00 BPW)
+# llama_model_quantize_impl: quant size  =  4460.75 MiB (4.91 BPW)
+# main: quantize time = 153863.51 ms
+# main:    total time = 153863.51 ms
+
+docker run --gpus all -v "H:\vision-models\:/models" ghcr.io/ggml-org/llama.cpp:full-cuda13 `
+    --quantize /models/llava-onevision-qwen2-7b-ov-hf_f16.gguf `
+    /models/llava-onevision-qwen2-7b-ov-hf_Q8_0.gguf Q8_0
+# llama_model_quantize_impl: model size  = 14527.15 MiB (16.00 BPW)
+# llama_model_quantize_impl: quant size  =  7718.14 MiB (8.50 BPW)
+# main: quantize time = 181988.42 ms
+# main:    total time = 181988.42 ms
+
+docker run --gpus all -v "H:\vision-models\:/models" ghcr.io/ggml-org/llama.cpp:full-cuda13 `
+    --quantize /models/llava-onevision-qwen2-7b-ov-hf_f16.gguf `
+    /models/llava-onevision-qwen2-7b-ov-hf_Q2_K.gguf Q2_K
+# llama_model_quantize_impl: model size  = 14527.15 MiB (16.00 BPW)
+# llama_model_quantize_impl: quant size  =  2870.80 MiB (3.16 BPW)
+# main: quantize time = 147674.36 ms
+# main:    total time = 147674.36 ms
+```
+
+## Convert lora to gguf and test it
+
+```powershell
+# Convert the PEFT adapter to a GGUF lora file
+# convert_lora_to_gguf.py is bundled in the Docker image
+docker run --gpus all `
+    -v "H:\vision-models\:/models" `
+    -v "C:\Users\Jukka\code\github-paazmaya\mine\llava-onevision-qwen2-0.5b-ov-hf-lora-kobudo\output\kobudo_lora\final:/lora" `
+    --entrypoint python3 ghcr.io/ggml-org/llama.cpp:full-cuda13 `
+    /app/convert_lora_to_gguf.py `
+    --base-model-id /models/llava-onevision-qwen2-7b-ov-hf `
+    --outfile /models/llava-onevision-qwen2-7b-ov-hf-kobudo-lora.gguf `
+    /lora
+
+# Then run inference with --lora
+docker run --gpus all -v "H:\vision-models\:/models" --entrypoint /app/llama-mtmd-cli `
+    ghcr.io/ggml-org/llama.cpp:full-cuda13 `
+    -m /models/llava-onevision-qwen2-7b-ov-hf_Q4_K_M.gguf `
+    --mmproj /models/mmproj-llava-onevision-qwen2-7b-ov-hf-f16.gguf `
+    --lora /models/llava-onevision-qwen2-7b-ov-hf-kobudo-lora.gguf `
+    --image /models/test.jpg `
+    -p "What is this Okinawan martial arts item?"
+```
+
+### Running inference with llama-mtmd-cli
+
+`llama-mtmd-cli` is the modern multimodal inference tool built into the image.
+It requires both the backbone GGUF (`-m`) and the mmproj GGUF (`--mmproj`).
+
+```powershell
+# Interactive chat mode (no --image or -p)
+docker run --gpus all -v "H:\vision-models\:/models" --entrypoint /app/llama-mtmd-cli `
+    ghcr.io/ggml-org/llama.cpp:full-cuda13 `
+    -m /models/llava-onevision-qwen2-7b-ov-hf_Q4_K_M.gguf `
+    --mmproj /models/mmproj-llava-onevision-qwen2-7b-ov-hf-f16.gguf
+
+# Single image query
+docker run --gpus all -v "H:\vision-models\:/models" --entrypoint /app/llama-mtmd-cli `
+    ghcr.io/ggml-org/llama.cpp:full-cuda13 `
+    -m /models/llava-onevision-qwen2-7b-ov-hf_Q4_K_M.gguf `
+    --mmproj /models/mmproj-llava-onevision-qwen2-7b-ov-hf-f16.gguf `
+    --image /models/test.jpg `
+    -p "What is this Okinawan martial arts item?"
+```
+
 ## License
 
 Apache-2.0
