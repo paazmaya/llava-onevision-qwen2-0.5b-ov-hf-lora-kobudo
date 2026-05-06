@@ -2,6 +2,8 @@
 
 LoRA fine-tuning of [llava-hf/llava-onevision-qwen2-0.5b-ov-hf](https://huggingface.co/llava-hf/llava-onevision-qwen2-0.5b-ov-hf) for recognizing and describing Okinawan martial arts equipment (kobudo weapons and karate gear).
 
+[Read about LLaVA-OneVision - Easy Visual Task Transfer at their blog](https://llava-vl.github.io/blog/2024-08-05-llava-onevision/)
+
 ## What it does
 
 The script fine-tunes the LLaVA-OneVision vision-language model using Low-Rank Adaptation (LoRA) so that it can identify and describe kobudo weapons (tonfa, sai, bo, nunchaku, kama, etc.) and karate equipment (makiwara, gi, heavy bag, etc.) from images. Responses are English-only.
@@ -72,6 +74,12 @@ uv run python train_kobudo_lora.py --data-path ./training_data --output-dir ./ou
 uv run python train_kobudo_lora.py --base-model "H:\vision-models\llava-hf_llava-onevision-qwen2-0.5b-ov-hf" --data-path "C:\Users\Jukka\Dropbox\onevision-lora-kobudo-images" --output-dir ./output/kobudo_lora
 ```
 
+Now that the config is in 4-bit, the 7B model should fit in my 12 GB vram...
+
+```powershell
+uv run python train_kobudo_lora.py --base-model "H:\vision-models\llava-onevision-qwen2-7b-ov-hf" --data-path "C:\Users\Jukka\Dropbox\onevision-lora-kobudo-images" --output-dir ./output/kobudo_lora
+```
+
 
 
 
@@ -108,6 +116,10 @@ Values that do not align with a pinpoint (e.g. `1024`) are silently upscaled to 
 ```bash
 uv run python infer_kobudo.py --lora-dir ./output/kobudo_lora/final
 ```
+```bash
+uv run python infer_kobudo.py --lora-dir ./output/kobudo_lora_7b/final --base-model "H:\vision-models\llava-onevision-qwen2-7b-ov-hf"
+```
+
 
 All arguments and their defaults:
 
@@ -246,10 +258,10 @@ docker run --gpus all -v "H:\vision-models\:/models" ghcr.io/ggml-org/llama.cpp:
 # convert_lora_to_gguf.py is bundled in the Docker image
 docker run --gpus all `
     -v "H:\vision-models\:/models" `
-    -v "C:\Users\Jukka\code\github-paazmaya\mine\llava-onevision-qwen2-0.5b-ov-hf-lora-kobudo\output\kobudo_lora\final:/lora" `
+    -v "C:\Users\Jukka\code\github-paazmaya\mine\llava-onevision-qwen2-0.5b-ov-hf-lora-kobudo\output\kobudo_lora_7b\final:/lora" `
     --entrypoint python3 ghcr.io/ggml-org/llama.cpp:full-cuda13 `
     /app/convert_lora_to_gguf.py `
-    --base-model-id /models/llava-onevision-qwen2-7b-ov-hf `
+    --base /models/llava-onevision-qwen2-7b-ov-hf `
     --outfile /models/llava-onevision-qwen2-7b-ov-hf-kobudo-lora.gguf `
     /lora
 

@@ -320,6 +320,21 @@ def load_model_and_processor(config: TrainingConfig):
     from peft import LoraConfig, get_peft_model
     from transformers import BitsAndBytesConfig
 
+    # GGUF files are an inference-only format used by llama.cpp and cannot be
+    # loaded by HuggingFace transformers for training or fine-tuning.
+    # Use the original HuggingFace model directory instead.
+    # The mmproj GGUF is only needed for llama-mtmd-cli inference, not here.
+    if str(config.base_model).lower().endswith(".gguf"):
+        raise ValueError(
+            f"'{config.base_model}' is a GGUF file.\n"
+            "GGUF is an inference-only format (llama.cpp) and cannot be used for "
+            "LoRA fine-tuning with HuggingFace transformers.\n"
+            "Pass the original HuggingFace model directory instead, e.g.:\n"
+            "  --base-model \"H:\\vision-models\\llava-onevision-qwen2-7b-ov-hf\"\n"
+            "The mmproj GGUF file is only needed for llama-mtmd-cli inference, "
+            "not for training."
+        )
+
     logger.info(f"Loading base model: {config.base_model}")
 
     processor = AutoProcessor.from_pretrained(config.base_model, trust_remote_code=True)
