@@ -77,19 +77,20 @@ class TrainingConfig:
     per_device_batch_size: int = 1
     gradient_accumulation_steps: int = 8
     learning_rate: float = 1e-5
-    num_train_epochs: int = 2
-    warmup_steps: int = 100
+    num_train_epochs: int = 3
+    warmup_steps: int = 10
     weight_decay: float = 0.01
-    max_grad_norm: float = 0.5
+    max_grad_norm: float = 1.0
     data_path: str = "./training_data"
     output_dir: str = "./output/kobudo_lora"
     max_new_tokens: int = 512
-    max_seq_length: int = 8192
+    max_seq_length: int = 2048
     # Cap the longest image edge before the processor's AnyRes tiling.
     # LLaVA-OneVision splits images into 384x384 tiles; a 2304x2304 image
     # produces ~36 tiles (~7 300 tokens) which exhausts 12 GB VRAM.
-    # 768 keeps the longest edge within a 2x2 tile grid (~4 tiles, ~800 tokens).
-    max_image_size: int = 768
+    # 384 produces a single tile (1+1=2 with thumbnail, ~590 tokens) which
+    # fits comfortably within max_seq_length=1024 on 12 GB VRAM.
+    max_image_size: int = 384
     temperature: float = 0.1
     top_p: float = 0.9
     mixed_precision: str = "bf16"
@@ -98,7 +99,9 @@ class TrainingConfig:
     save_steps: int = 50
     eval_steps: int = 50
     seed: int = 42
-    num_workers: int = 2
+    # num_workers=0 avoids Windows DataLoader deadlocks caused by PyTorch's
+    # spawn-based multiprocessing interacting with the HF processor.
+    num_workers: int = 0
     smoke_test: bool = False
 
     def __post_init__(self):
@@ -203,10 +206,17 @@ def auto_generate_caption(
 class KobudoDataset(Dataset):
     """Dataset for kobudo/karate items from folder-based images"""
 
-    def __init__(self, image_folder: str, processor: Any, max_image_size: int = 1152):
+    def __init__(
+        self,
+        image_folder: str,
+        processor: Any,
+        max_image_size: int = 384,
+        max_seq_length: int = 1024,
+    ):
         self.image_folder = Path(image_folder)
         self.processor = processor
         self.max_image_size = max_image_size
+        self.max_seq_length = max_seq_length
         self.image_extensions = {
             ".jpg",
             ".jpeg",
@@ -291,38 +301,54 @@ class KobudoDataset(Dataset):
             logger.warning(f"Failed to load {image_path}: {e}")
             image = Image.new("RGB", (384, 384), color="black")
 
-        # Generate question/answer pair for this image.
-        # The chat template's {% generation %} block marks the assistant turn
-        # as the only part the model trains on — so the description MUST be
-        # in the assistant turn, not the user turn.
         question, answer = auto_generate_caption(
             image_path.stem, image_path, self.image_folder
         )
 
+        user_turn = {
+            "role": "user",
+            "content": [
+                {"type": "image"},
+                {"type": "text", "text": question},
+            ],
+        }
         conversation = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image"},
-                    {"type": "text", "text": question},
-                ],
-            },
+            user_turn,
             {
                 "role": "assistant",
-                "content": [
-                    {"type": "text", "text": answer},
-                ],
+                "content": [{"type": "text", "text": answer}],
             },
         ]
-        prompt = self.processor.apply_chat_template(
+        full_prompt = self.processor.apply_chat_template(
             conversation, add_generation_prompt=False
         )
-
         inputs = self.processor(
-            text=[prompt],
+            text=[full_prompt],
             images=[image],
             return_tensors="pt",
         )
+
+        # Build labels: mask every token that belongs to the prompt (image
+        # placeholder tokens + user text) with -100 so the loss is only
+        # computed on the assistant answer tokens.
+        #
+        # We get the exact prompt length by running the processor on the user
+        # turn alone with add_generation_prompt=True.  The image tokens are
+        # expanded inside input_ids, so this is the only reliable way to find
+        # the split point.
+        prompt_only_text = self.processor.apply_chat_template(
+            [user_turn], add_generation_prompt=True
+        )
+        prompt_only_inputs = self.processor(
+            text=[prompt_only_text],
+            images=[image],
+            return_tensors="pt",
+        )
+        prompt_length = prompt_only_inputs["input_ids"].shape[1]
+
+        labels = inputs["input_ids"].clone()
+        labels[0, :prompt_length] = -100
+        inputs["labels"] = labels
 
         return {k: v.squeeze(0) if v.dim() > 1 else v for k, v in inputs.items()}
 
@@ -440,17 +466,23 @@ class _VisionDataCollator:
                         padded_vals.append(v)
                     batch[key] = torch.stack(padded_vals)
             else:
-                # 1-D sequence tensors — pad to the longest in this batch
+                # 1-D sequence tensors — pad to the longest in this batch.
+                # labels are padded with -100 (ignored by loss);
+                # input_ids with pad_token_id; everything else with 0.
                 max_len = max(v.size(0) for v in vals)
-                fill = self.pad_token_id if key == "input_ids" else 0
+                if key == "labels":
+                    fill = -100
+                elif key == "input_ids":
+                    fill = self.pad_token_id
+                else:
+                    fill = 0
                 padded = torch.full((len(vals), max_len), fill, dtype=vals[0].dtype)
                 for i, v in enumerate(vals):
                     padded[i, : v.size(0)] = v
                 batch[key] = padded
-        if "labels" not in batch:
-            batch["labels"] = batch["input_ids"].clone()
-            # Mask padding so it does not contribute to the loss
-            batch["labels"][batch["labels"] == self.pad_token_id] = -100
+        # Mask any input_ids padding that leaked into labels (safety net).
+        if "labels" in batch:
+            batch["labels"][batch["input_ids"] == self.pad_token_id] = -100
         return batch
 
 
@@ -483,9 +515,9 @@ def train(config: TrainingConfig):
         config.per_device_batch_size = 2
         config.gradient_accumulation_steps = 1
         config.max_seq_length = 512
-        # Keep num_workers=1 (not 0) so the multiprocessing/pickle path is
-        # exercised and unpicklable objects (e.g. local classes) are caught.
-        config.num_workers = 1
+        # Keep num_workers=0 on Windows — spawn-based multiprocessing deadlocks
+        # with the HF processor; main-process loading is fast enough for smoke tests.
+        config.num_workers = 0
         config.output_dir = str(Path(config.output_dir).parent / "smoke_test")
 
     os.makedirs(config.output_dir, exist_ok=True)
@@ -505,7 +537,10 @@ def train(config: TrainingConfig):
     # Create dataset
     logger.info(f"Loading images from: {config.data_path}")
     full_dataset = KobudoDataset(
-        config.data_path, processor, max_image_size=config.max_image_size
+        config.data_path,
+        processor,
+        max_image_size=config.max_image_size,
+        max_seq_length=config.max_seq_length,
     )
 
     # Split train/eval 90/10
@@ -525,6 +560,14 @@ def train(config: TrainingConfig):
     pad_token_id = processor.tokenizer.pad_token_id or 0
     data_collator = _VisionDataCollator(pad_token_id)
 
+    # Warmup must not exceed total optimizer steps; cap at 10% of total steps.
+    total_opt_steps = (
+        len(train_dataset)
+        // (config.per_device_batch_size * config.gradient_accumulation_steps)
+    ) * config.num_train_epochs
+    effective_warmup = min(config.warmup_steps, max(5, total_opt_steps // 10))
+    logger.info(f"Effective warmup steps: {effective_warmup} / {total_opt_steps} total")
+
     training_args = TrainingArguments(
         output_dir=config.output_dir,
         per_device_train_batch_size=config.per_device_batch_size,
@@ -532,7 +575,7 @@ def train(config: TrainingConfig):
         gradient_accumulation_steps=config.gradient_accumulation_steps,
         learning_rate=config.learning_rate,
         num_train_epochs=config.num_train_epochs,
-        warmup_steps=config.warmup_steps,
+        warmup_steps=effective_warmup,
         lr_scheduler_type=config.lr_scheduler_type,
         weight_decay=config.weight_decay,
         max_grad_norm=config.max_grad_norm,
@@ -628,13 +671,14 @@ def main():
     )
     parser.add_argument("--rank", type=int, default=32, help="LoRA rank")
     parser.add_argument("--alpha", type=int, default=32, help="LoRA alpha")
-    parser.add_argument("--epochs", type=int, default=2, help="Training epochs")
+    parser.add_argument("--epochs", type=int, default=3, help="Training epochs")
     parser.add_argument("--batch-size", type=int, default=2, help="Batch size")
     parser.add_argument("--lr", type=float, default=1e-5, help="Learning rate")
+
     parser.add_argument(
         "--max-image-size",
         type=int,
-        default=768,
+        default=384,
         help=(
             "Cap the longest image edge (pixels) before AnyRes tiling. "
             "Must align with a processor pinpoint (384, 768, 1152, 1536, …). "

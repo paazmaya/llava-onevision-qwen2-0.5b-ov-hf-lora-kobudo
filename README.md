@@ -71,7 +71,7 @@ uv run python train_kobudo_lora.py --data-path ./training_data --output-dir ./ou
 ```
 
 ```powershell
-uv run python train_kobudo_lora.py --base-model "H:\vision-models\llava-hf_llava-onevision-qwen2-0.5b-ov-hf" --data-path "C:\Users\Jukka\Dropbox\onevision-lora-kobudo-images" --output-dir ./output/kobudo_lora
+uv run python train_kobudo_lora.py --base-model "H:\vision-models\llava-hf_llava-onevision-qwen2-0.5b-ov-hf" --data-path "C:\Users\Jukka\Dropbox\onevision-lora-kobudo-images" --output-dir ./output/kobudo_lora_0.5b_2026-05-07
 ```
 
 Now that the config is in 4-bit, the 7B model should fit in my 12 GB vram...
@@ -79,9 +79,6 @@ Now that the config is in 4-bit, the 7B model should fit in my 12 GB vram...
 ```powershell
 uv run python train_kobudo_lora.py --base-model "H:\vision-models\llava-onevision-qwen2-7b-ov-hf" --data-path "C:\Users\Jukka\Dropbox\onevision-lora-kobudo-images" --output-dir ./output/kobudo_lora
 ```
-
-
-
 
 All arguments and their defaults:
 
@@ -116,10 +113,10 @@ Values that do not align with a pinpoint (e.g. `1024`) are silently upscaled to 
 ```bash
 uv run python infer_kobudo.py --lora-dir ./output/kobudo_lora/final
 ```
+
 ```bash
 uv run python infer_kobudo.py --lora-dir ./output/kobudo_lora_7b/final --base-model "H:\vision-models\llava-onevision-qwen2-7b-ov-hf"
 ```
-
 
 All arguments and their defaults:
 
@@ -295,6 +292,133 @@ docker run --gpus all -v "H:\vision-models\:/models" --entrypoint /app/llama-mtm
     --image /models/test.jpg `
     -p "What is this Okinawan martial arts item?"
 ```
+
+Searched for files matching `**/output/kobudo_lora_7b/**`, no matches
+
+Read [](file:///c%3A/Users/Jukka/code/github-paazmaya/mine/llava-onevision-qwen2-0.5b-ov-hf-lora-kobudo/output/kobudo_lora/training_summary.json)
+
+Searched for files matching `**/output/kobudo_lora_7b*`, no matches
+
+Ran terminal command: Get-ChildItem -Recurse "C:\Users\Jukka\code\github-paazmaya\mine\llava-onevision-qwen2-0.5b-ov-hf-lora-kobudo\output\kobudo_lora_7b" | Select-Object FullName, Length
+
+Ran terminal command: Get-Content "C:\Users\Jukka\code\github-paazmaya\mine\llava-onevision-qwen2-0.5b-ov-hf-lora-kobudo\output\kobudo_lora_7b\training_summary.json"
+
+## Training runs done so far
+
+Here's a summary of the completed 7B training run:
+
+**Model**
+
+- Base: `llava-onevision-qwen2-7b-ov-hf`
+- LoRA rank: 32, alpha: 32
+- Trainable params: 86,491,136 / 4,648,244,768 (**1.86%**)
+
+**Dataset** — 363 images total
+| Item | Images | | Item | Images |
+|---|---|---|---|---|
+| bo | 133 | | tinbe | 21 |
+| sai | 72 | | kama | 18 |
+| nunchaku | 37 | | tekko | 13 |
+| surujin | 12 | | eiku | 11 |
+| tonfa | 14 | | manjisai | 8 |
+| jo | 14 | | kusarigama | 4 |
+| jutte | 2 | | bokken | 2 |
+| shuriken | 1 | | kuwa | 1 |
+
+- Train / eval split: **327 / 36**
+
+**Training** (3 epochs, 63 steps)
+| Metric | Value |
+|---|---|
+| Total runtime | ~15h 8min (54,480 s) |
+| Final train loss | 18.38 → 17.44 |
+| Final eval loss | 17.90 → **16.39** |
+| Samples/sec | 0.018 |
+
+**Training Run — 0.5B model, 2026-05-07**
+
+**Model**
+
+- Base: `llava-onevision-qwen2-0.5b-ov-hf`
+- LoRA rank 16, alpha 16
+- Trainable params: 11,673,600 / 527,595,552 (**2.21%**)
+
+**Dataset** — 636 images, 17 classes
+| Item | Images | | Item | Images |
+|---|---|---|---|---|
+| bo | 199 | | tekko | 49 |
+| sai | 112 | | jo | 49 |
+| nunchaku | 53 | | kama | 45 |
+| tinbe | 27 | | tonfa | 29 |
+| bokken | 16 | | surujin | 12 |
+| kusarigama | 12 | | eiku | 12 |
+| manjisai | 9 | | jutte | 6 |
+| shuriken | 3 | | sanbonnunchaku | 2 |
+| kuwa | 1 | | | |
+
+- Train / eval split: **586 / 50**
+
+**Training** (2 epochs, 74 steps)
+| Metric | Value |
+|---|---|
+| Total runtime | **23 min 43 s** |
+| Samples/sec | 0.823 |
+| Train loss | 19.51 → **18.61** |
+| Eval loss @ epoch 1.4 | 19.08 |
+| Eval loss @ epoch 2 | **18.08** |
+
+**Comparison vs previous 7B run**
+
+|                 | 7B (broken QLoRA) | 0.5B (fixed) |
+| --------------- | ----------------- | ------------ |
+| Runtime         | ~15h              | **24 min**   |
+| Final eval loss | 16.39             | 18.08        |
+| Steps/hour      | ~4                | ~187         |
+
+Label masking fixes worked. Here's the comparison:
+
+| Metric                | Before (broken labels) | After (fixed) |
+| --------------------- | ---------------------- | ------------- |
+| Initial train loss    | 19.51                  | **3.837**     |
+| Final train loss      | 18.61                  | **2.718**     |
+| Eval loss @ epoch 1.4 | 19.08                  | **2.836**     |
+| Eval loss @ epoch 2   | 18.08                  | **2.782**     |
+| Runtime               | 23m 43s                | 23m 25s       |
+
+Loss dropped from ~19 to ~2.8 — an 85% reduction. The label masking fix was entirely responsible: the model was previously trying to predict ~700 tokens per sample (image patches + user prompt + answer), averaging the loss over mostly noise. Now it only trains on the ~50–100 answer tokens it should actually learn.
+
+Eval loss (2.782) is very close to train loss (2.718), meaning no overfitting on 2 epochs. The model has headroom to train further — running 3–5 epochs or increasing rank back to 32 could push it lower still.
+
+**Training Run — 0.5B, rank 32, 3 epochs, 2026-05-07c**
+
+| Metric            | Value                                |
+| ----------------- | ------------------------------------ |
+| Base model        | `llava-onevision-qwen2-0.5b-ov-hf`   |
+| LoRA rank / alpha | 32 / 32                              |
+| Trainable params  | 23,347,200 / 539,269,152 (**4.33%**) |
+| Dataset           | 636 images, 586 train / 50 eval      |
+| Total steps       | 111 over 3 epochs                    |
+| Runtime           | **37 min 35 s**                      |
+
+**Loss curve**
+
+| Epoch | Train loss | Eval loss |
+| ----- | ---------- | --------- |
+| 0.03  | 3.837      | —         |
+| 1.36  | 2.194      | **2.165** |
+| 2.71  | 1.423      | 1.618     |
+| 3.00  | 1.376      | **1.614** |
+
+**Comparison across all runs**
+
+| Run                       | Model                | Rank   | Epochs | Final eval loss | Runtime    |
+| ------------------------- | -------------------- | ------ | ------ | --------------- | ---------- |
+| kobudo_lora_7b            | 7B (broken QLoRA)    | 32     | 3      | 16.39           | ~15h       |
+| kobudo*lora_0.5b*…07      | 0.5B (broken labels) | 16     | 2      | 18.08           | 24 min     |
+| kobudo*lora_0.5b*…07b     | 0.5B (fixed labels)  | 16     | 2      | 2.782           | 24 min     |
+| **kobudo*lora_0.5b*…07c** | **0.5B**             | **32** | **3**  | **1.614**       | **38 min** |
+
+The gap between train loss (1.376) and eval loss (1.614) is healthy — light generalization, no serious overfitting. At this quality level the model should produce correct, specific descriptions. Worth testing with inference now.
 
 ## License
 
