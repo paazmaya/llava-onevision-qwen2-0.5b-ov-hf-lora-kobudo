@@ -77,7 +77,7 @@ class TrainingConfig:
     per_device_batch_size: int = 1
     gradient_accumulation_steps: int = 8
     learning_rate: float = 1e-5
-    num_train_epochs: int = 3
+    num_train_epochs: int = 2
     warmup_steps: int = 100
     weight_decay: float = 0.01
     max_grad_norm: float = 0.5
@@ -207,7 +207,18 @@ class KobudoDataset(Dataset):
         self.image_folder = Path(image_folder)
         self.processor = processor
         self.max_image_size = max_image_size
-        self.image_extensions = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".gif", ".heic", ".heif"}
+        self.image_extensions = {
+            ".jpg",
+            ".jpeg",
+            ".png",
+            ".webp",
+            ".bmp",
+            ".tif",
+            ".tiff",
+            ".gif",
+            ".heic",
+            ".heif",
+        }
 
         # Load items before collection so we can filter during discovery.
         items = _load_items()[0]
@@ -284,7 +295,9 @@ class KobudoDataset(Dataset):
         # The chat template's {% generation %} block marks the assistant turn
         # as the only part the model trains on — so the description MUST be
         # in the assistant turn, not the user turn.
-        question, answer = auto_generate_caption(image_path.stem, image_path, self.image_folder)
+        question, answer = auto_generate_caption(
+            image_path.stem, image_path, self.image_folder
+        )
 
         conversation = [
             {
@@ -317,7 +330,7 @@ class KobudoDataset(Dataset):
 def load_model_and_processor(config: TrainingConfig):
     """Load model and processor with LoRA applied"""
     from transformers import AutoProcessor, LlavaOnevisionForConditionalGeneration
-    from peft import LoraConfig, get_peft_model
+    from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
     from transformers import BitsAndBytesConfig
 
     # GGUF files are an inference-only format used by llama.cpp and cannot be
@@ -330,7 +343,7 @@ def load_model_and_processor(config: TrainingConfig):
             "GGUF is an inference-only format (llama.cpp) and cannot be used for "
             "LoRA fine-tuning with HuggingFace transformers.\n"
             "Pass the original HuggingFace model directory instead, e.g.:\n"
-            "  --base-model \"H:\\vision-models\\llava-onevision-qwen2-7b-ov-hf\"\n"
+            '  --base-model "H:\\vision-models\\llava-onevision-qwen2-7b-ov-hf"\n'
             "The mmproj GGUF file is only needed for llama-mtmd-cli inference, "
             "not for training."
         )
@@ -343,10 +356,9 @@ def load_model_and_processor(config: TrainingConfig):
 
     # 8-bit or 4-bit quantisation
     quantization_config = BitsAndBytesConfig(
-        #load_in_8bit=True,
-        #llm_int8_enable_fp32_cpu_offload=True
+        # load_in_8bit=True,
+        # llm_int8_enable_fp32_cpu_offload=True
         # Above are the 8-bit settings
-
         # Below are the 4-bit settings
         load_in_4bit=True,
         bnb_4bit_compute_dtype=torch.bfloat16,
@@ -361,6 +373,10 @@ def load_model_and_processor(config: TrainingConfig):
         torch_dtype=torch_dtype,
         device_map="auto",
     )
+
+    # Required for QLoRA: prepares the quantized model for gradient-based
+    # training by casting layer norms to float32 and enabling gradient checkpointing.
+    model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)
 
     lora_config = LoraConfig(
         r=config.lora_rank,
@@ -612,7 +628,7 @@ def main():
     )
     parser.add_argument("--rank", type=int, default=32, help="LoRA rank")
     parser.add_argument("--alpha", type=int, default=32, help="LoRA alpha")
-    parser.add_argument("--epochs", type=int, default=3, help="Training epochs")
+    parser.add_argument("--epochs", type=int, default=2, help="Training epochs")
     parser.add_argument("--batch-size", type=int, default=2, help="Batch size")
     parser.add_argument("--lr", type=float, default=1e-5, help="Learning rate")
     parser.add_argument(

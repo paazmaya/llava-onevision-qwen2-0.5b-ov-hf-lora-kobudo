@@ -96,6 +96,8 @@ def interactive_inference(
             device = next(model.parameters()).device
             inputs = {k: v.to(device) for k, v in inputs.items()}
 
+            input_length = inputs["input_ids"].shape[1]
+
             with torch.no_grad():
                 outputs = model.generate(
                     **inputs,
@@ -105,7 +107,9 @@ def interactive_inference(
                     do_sample=True,
                 )
 
-            response = processor.batch_decode(outputs, skip_special_tokens=True)[0]
+            # Decode only the newly generated tokens, not the input prompt.
+            new_tokens = outputs[:, input_length:]
+            response = processor.batch_decode(new_tokens, skip_special_tokens=True)[0]
 
             print("\n" + "-" * 40)
             print("RESPONSE:")

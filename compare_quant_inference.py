@@ -16,7 +16,7 @@ from llama_cpp.llama_chat_format import LlavaOnevisionChatHandler
 # Configuration
 # ------------------------------------------------------------
 BASE_MODEL_ID = "llava-hf/llava-onevision-qwen2-7b-ov-hf"
-LORA_PATH = "./kobudo-lora"               # your trained adapter
+LORA_PATH = "./kobudo-lora"  # your trained adapter
 IMAGE_PATH = "test_weapon.jpg"
 
 # llama.cpp files (from your earlier quantization)
@@ -24,6 +24,7 @@ GGUF_2BIT = "./llava-onevision-qwen2-7b-ov-hf_Q2_K.gguf"
 MMPROJ_PATH = "./mmproj-llava-onevision-qwen2-7b-ov-hf-f16.gguf"  # if needed
 LORA_GGML = "./kobudo-lora.ggml.bin"
 N_CTX = 2048  # context length
+
 
 # ------------------------------------------------------------
 # 1. Inference using transformers: 8-bit base + LoRA
@@ -69,6 +70,7 @@ def run_transformers_quant(quant_type):
     del model
     torch.cuda.empty_cache()
 
+
 # ------------------------------------------------------------
 # 2. Inference using llama.cpp: 2-bit base + LoRA
 # ------------------------------------------------------------
@@ -77,7 +79,7 @@ def run_llamacpp_2bit():
 
     # Create a chat handler that knows how to embed images for LLaVA
     chat_handler = LlavaOnevisionChatHandler(
-        clip_model_path=MMPROJ_PATH,   # mmproj file if needed
+        clip_model_path=MMPROJ_PATH,  # mmproj file if needed
         verbose=False,
     )
 
@@ -85,18 +87,21 @@ def run_llamacpp_2bit():
         model_path=GGUF_2BIT,
         chat_handler=chat_handler,
         n_ctx=N_CTX,
-        n_gpu_layers=-1,               # offload all layers to GPU if you want
-        lora_path=LORA_GGML,           # apply your LoRA
+        n_gpu_layers=-1,  # offload all layers to GPU if you want
+        lora_path=LORA_GGML,  # apply your LoRA
         verbose=False,
     )
 
     # Prepare the chat message with the image
     image_uri = "file://" + IMAGE_PATH
     messages = [
-        {"role": "user", "content": [
-            {"type": "image_url", "image_url": {"url": image_uri}},
-            {"type": "text", "text": "Describe the weapon and its usage."}
-        ]}
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": image_uri}},
+                {"type": "text", "text": "Describe the weapon and its usage."},
+            ],
+        }
     ]
 
     start = time.time()
@@ -108,6 +113,7 @@ def run_llamacpp_2bit():
     print(f"Inference time: {elapsed:.2f}s")
 
     del llm
+
 
 # ------------------------------------------------------------
 # Main
