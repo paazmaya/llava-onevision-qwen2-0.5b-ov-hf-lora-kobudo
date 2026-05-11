@@ -230,56 +230,29 @@ class KobudoDataset(Dataset):
             ".heif",
         }
 
-        # Load items before collection so we can filter during discovery.
-        items = _load_items()[0]
-        keys: set[str] = set(items.keys())
-
-        def _key_match(img_path: Path) -> Optional[str]:
-            """Return the first matching key for *img_path*, or None.
-
-            An image is accepted when its filename begins with a key followed
-            by ``_`` (or equals the key), OR when any directory component
-            between *image_folder* and the file is an exact key match.
-            """
-            stem_lower = img_path.stem.lower()
-            # Filename prefix — items are sorted longest-first to avoid
-            # 'sai' matching before 'manjisai'.
-            for key in items:
-                if stem_lower.startswith(key + "_") or stem_lower == key:
-                    return key
-            # Exact directory name match
-            for part in img_path.relative_to(self.image_folder).parts[:-1]:
-                if part.lower() in keys:
-                    return part.lower()
-            return None
-
-        # Find all images recursively, keeping only those that match a key.
+        # Find all images recursively, keeping only those that have a sidecar .txt file.
         all_images: list[Path] = []
         for ext in self.image_extensions:
             all_images.extend(self.image_folder.rglob(f"*{ext}"))
             all_images.extend(self.image_folder.rglob(f"*{ext.upper()}"))
 
+        all_found = set(all_images)
         self.image_files = sorted(
-            img for img in set(all_images) if _key_match(img) is not None
+            img for img in all_found if img.with_suffix(".txt").exists()
         )
+        skipped = len(all_found) - len(self.image_files)
 
         if len(self.image_files) == 0:
             raise ValueError(
-                f"No images found under {image_folder} matching any known key. "
+                f"No images with sidecar .txt captions found under {image_folder}. "
+                f"Run describe_images.py first to generate them. "
                 f"Supported formats: JPG, JPEG, PNG, WebP, BMP, TIFF, GIF, HEIC, HEIF"
             )
 
-        logger.info(f"Found {len(self.image_files)} images under {image_folder}")
-
-        # Per-key stats
-        counts: dict[str, int] = {key: 0 for key in items}
-        for img in self.image_files:
-            key = _key_match(img)
-            if key and key in counts:
-                counts[key] += 1
-        for key, count in counts.items():
-            if count > 0:
-                logger.info(f"  {key}: {count} image(s)")
+        logger.info(
+            f"Found {len(self.image_files)} image(s) with sidecar captions under {image_folder} "
+            f"({skipped} image(s) skipped — no .txt sidecar)"
+        )
 
     def __len__(self) -> int:
         return len(self.image_files)
@@ -301,9 +274,9 @@ class KobudoDataset(Dataset):
             logger.warning(f"Failed to load {image_path}: {e}")
             image = Image.new("RGB", (384, 384), color="black")
 
-        question, answer = auto_generate_caption(
-            image_path.stem, image_path, self.image_folder
-        )
+        txt_path = image_path.with_suffix(".txt")
+        answer = txt_path.read_text(encoding="utf-8").strip()
+        question = _load_items()[1]  # user_question from items.toml
 
         user_turn = {
             "role": "user",

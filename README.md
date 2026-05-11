@@ -37,6 +37,25 @@ uv venv
 uv sync
 ```
 
+### Troubleshooting: `llama-cpp-python` build failure on Windows with LLVM/Clang
+
+When building from source with Clang on Windows, the linker (`lld-link`) may fail with undefined OpenMP symbols:
+
+```
+lld-link: error: undefined symbol: __kmpc_global_thread_num
+lld-link: error: undefined symbol: __kmpc_fork_call
+clang++: error: linker command failed with exit code 1
+```
+
+This happens even though `libomp.lib` is present in `C:\Program Files\LLVM\lib`, because `lld-link` does not find it automatically. The fix is to disable OpenMP at the CMake level via an environment variable before running `uv sync`:
+
+```powershell
+$env:CMAKE_ARGS = "-DGGML_OPENMP=OFF"
+uv sync
+```
+
+> **Note:** Do not set `$env:LIB` to point at the LLVM lib directory — if `LIB` was previously unset, doing so will strip all Windows SDK paths (e.g. `kernel32.lib`) and break the CMake compiler check entirely. The `-DGGML_OPENMP=OFF` approach is the safe workaround. Performance is not meaningfully affected since llama.cpp uses its own thread pool for parallelism regardless.
+
 It is a good idea to pull the model locally:
 
 ```sh
@@ -60,6 +79,12 @@ training_data/
     ├── sai_weapon.jpg
     ├── bo_staff.png
     └── ...
+```
+
+Pre describe the images and add then the correct keywords.
+
+```powershell
+uv run python pre_describe_images.py --model "H:\vision-models\llava-onevision-qwen2-7b-ov-hf_Q4_K_M.gguf" --image-dir "C:\Users\Jukka\Dropbox\onevision-lora-kobudo-images\"
 ```
 
 ## How to run

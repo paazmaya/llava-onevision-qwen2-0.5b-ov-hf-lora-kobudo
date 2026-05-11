@@ -8,9 +8,7 @@ from transformers import (
 )
 from peft import PeftModel
 from llama_cpp import Llama
-from llama_cpp.llama_chat_format import LlavaOnevisionChatHandler
-
-# pip install transformers accelerate peft bitsandbytes llama-cpp-python pillow
+from llama_cpp.llama_chat_format import Qwen25VLChatHandler
 
 # ------------------------------------------------------------
 # Configuration
@@ -78,7 +76,7 @@ def run_llamacpp_2bit():
     print("\n=== Testing 2-bit (Q2_K) base + LoRA via llama.cpp ===")
 
     # Create a chat handler that knows how to embed images for LLaVA
-    chat_handler = LlavaOnevisionChatHandler(
+    chat_handler = Qwen25VLChatHandler(
         clip_model_path=MMPROJ_PATH,  # mmproj file if needed
         verbose=False,
     )
