@@ -32,6 +32,10 @@ import mimetypes
 from pathlib import Path
 from typing import Callable
 
+# Register types not always present in the platform's mimetypes database
+mimetypes.add_type("image/heic", ".heic")
+mimetypes.add_type("image/heif", ".heif")
+
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
@@ -88,20 +92,7 @@ def _mime_type(image_path: Path) -> str:
     guessed, _ = mimetypes.guess_type(image_path.name)
     if guessed and guessed.startswith("image/"):
         return guessed
-    # Fallback based on suffix
-    fallback = {
-        ".jpg": "image/jpeg",
-        ".jpeg": "image/jpeg",
-        ".png": "image/png",
-        ".webp": "image/webp",
-        ".bmp": "image/bmp",
-        ".tif": "image/tiff",
-        ".tiff": "image/tiff",
-        ".gif": "image/gif",
-        ".heic": "image/heic",
-        ".heif": "image/heif",
-    }
-    return fallback.get(image_path.suffix.lower(), "image/jpeg")
+    return "image/jpeg"
 
 
 def _image_data_uri(image_path: Path) -> str:

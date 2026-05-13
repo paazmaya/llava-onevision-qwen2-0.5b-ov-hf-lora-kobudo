@@ -56,6 +56,26 @@ uv sync
 
 > **Note:** Do not set `$env:LIB` to point at the LLVM lib directory — if `LIB` was previously unset, doing so will strip all Windows SDK paths (e.g. `kernel32.lib`) and break the CMake compiler check entirely. The `-DGGML_OPENMP=OFF` approach is the safe workaround. Performance is not meaningfully affected since llama.cpp uses its own thread pool for parallelism regardless.
 
+### GPU (CUDA) support for `llama-cpp-python` on Windows
+
+Building `llama-cpp-python` from source with CUDA fails on Windows when using LLVM/Clang, because `nvcc` requires MSVC's `link.exe` but the build uses `lld-link.exe` which mishandles manifest generation.
+
+Use the pre-built CUDA 12.4 wheel from the official index instead:
+
+```powershell
+uv pip install "llama-cpp-python==0.3.23" --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124 --force-reinstall
+```
+
+This wheel ships `ggml-cuda.dll` but needs `cudart64_12.dll` at runtime. If you only have CUDA 13.x installed, add the CUDA 12.x bin directory (e.g. CUDA 12.9) to your user PATH once:
+
+```powershell
+$cudaPath = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9\bin"
+$currentPath = [Environment]::GetEnvironmentVariable("PATH", "User")
+[Environment]::SetEnvironmentVariable("PATH", "$cudaPath;$currentPath", "User")
+```
+
+After a new terminal session, `llama-cpp-python` will use the GPU automatically.
+
 It is a good idea to pull the model locally:
 
 ```sh
@@ -85,6 +105,8 @@ Pre describe the images and add then the correct keywords.
 
 ```powershell
 uv run python pre_describe_images.py --model "H:\vision-models\llava-onevision-qwen2-7b-ov-hf_Q4_K_M.gguf" --image-dir "C:\Users\Jukka\Dropbox\onevision-lora-kobudo-images\"
+
+uv run python pre_describe_images_minicpm.py --model "H:\vision-models\MiniCPM-V-4_6-Q4_K_M.gguf" --mmproj "H:\vision-models\mmproj-MiniCPM-V-4_6-f16.gguf" --image-dir "C:\Users\Jukka\Dropbox\onevision-lora-kobudo-images\" --overwrite
 ```
 
 ## How to run
