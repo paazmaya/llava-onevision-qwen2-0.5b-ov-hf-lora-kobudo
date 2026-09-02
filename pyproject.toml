@@ -8,7 +8,7 @@ requires-python = ">=3.13"
 dependencies = [
   "torch==2.11.0",
   "torchvision==0.26.0",
-  "transformers==5.8.0",
+  "transformers==5.10.1",
   "bitsandbytes==0.49.2",
   "accelerate==1.13.0",
   "peft==0.19.1",
