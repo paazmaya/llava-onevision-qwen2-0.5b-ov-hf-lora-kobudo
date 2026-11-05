@@ -2,6 +2,7 @@
 name = "llava-onevision-qwen2-0.5b-ov-hf-lora-kobudo"
 version = "1.0.0"
 license = "Apache-2.0"
+authors = [{ name = "Juga Paazmaya", email = "paazmaya@yahoo.com" }]
 description = "AI-powered image classifier for human detection and gender classification"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -18,6 +19,10 @@ dependencies = [
   "numpy==2.4.4",
   "tensorboard==2.20.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/paazmaya/llava-onevision-qwen2-0.5b-ov-hf-lora-kobudo"
+Repository = "https://github.com/paazmaya/llava-onevision-qwen2-0.5b-ov-hf-lora-kobudo"
 
 [dependency-groups]
 dev = ["ruff==0.15.11"]
